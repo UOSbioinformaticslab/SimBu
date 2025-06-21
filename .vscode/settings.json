@@ -1,8 +1,5 @@
 {
     "github.copilot.chat.commitMessageGeneration.instructions": [
-        {
-            "file": "copilot/commit-message.md"
-        }
-    ],
-    "github.copilot.chat.agent.runTasks": true
+        
+    ]
 }

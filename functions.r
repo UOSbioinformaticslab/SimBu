@@ -6,7 +6,7 @@
 #' and then loads them into the session.
 #'
 #' @param packages_to_install A character vector of package names.
-#' @return Invisible. This function is called for its side effect of loading packages.
+#' @return Invisible
 #' @importFrom BiocManager install
 install_and_load_packages <- function(packages_to_install) {
   # Ensure BiocManager is installed
@@ -252,7 +252,7 @@ run_ruvg <- function(raw_counts, control_genes, k = 1) {
     stop("None of the provided control genes were found in the count matrix.")
   }
   
-  # *** THE FINAL FIX: Call newSeqExpressionSet from its source package, EDASeq. ***
+  # *** FIX: Call newSeqExpressionSet from its source package, EDASeq. ***
   set <- EDASeq::newSeqExpressionSet(counts = counts_matrix)
   
   # Run RUVg using the control genes to estimate factors of unwanted variation
