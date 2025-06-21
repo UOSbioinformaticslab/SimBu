@@ -101,41 +101,36 @@ generate_simulations <- function(simbu_dataset, n_sims = 3, n_samples_per_sim = 
 #' @param sim_list A list of `SimBu_simulation` objects.
 #' @param n_genes_affected An integer, the number of genes to be affected by the batch effect.
 #' @param effect_multiplier A numeric value for the batch effect strength.
-#' @return A list containing the `SummarizedExperiment` object with the batch effect (`se_with_batch`),
-#'         and a character vector of batch information (`batch_info`).
-#' @importFrom SummarizedExperiment assay
+#' @return A list containing the modified `SummarizedExperiment` object (`se_with_batch`),
+#'         a character vector of batch information (`batch_info`), and the names of
+#'         the genes affected by the batch effect (`affected_genes`).
+#' @importFrom SummarizedExperiment assay `assay<-`
 introduce_batch_effect <- function(sim_list, n_genes_affected = 150, effect_multiplier = 2.5) {
-  # SimBu::merge_simulations returns a list, with the SE object in the 'bulk' element.
   merged_list <- SimBu::merge_simulations(sim_list)
-  
-  # Extract the SummarizedExperiment object from the list
   se_object <- merged_list$bulk
-  
-  # *** FIX: Ensure column names are unique after merging ***
-  # This prevents errors in downstream functions that require unique names.
   colnames(se_object) <- make.names(colnames(se_object), unique = TRUE)
   
-  # Extract counts and define batch information
   counts_matrix <- SummarizedExperiment::assay(se_object, "bulk_counts")
   n_samples_per_batch <- ncol(sim_list[[1]]$bulk)
   batch_info <- rep(paste("Batch", 1:length(sim_list)), each = n_samples_per_batch)
   
-  # Select genes to be affected by the batch effect
   set.seed(456)
   affected_genes <- sample(rownames(counts_matrix), n_genes_affected)
   
-  # Apply batch effect
   batch2_cols <- which(batch_info == "Batch 2")
   batch3_cols <- which(batch_info == "Batch 3")
   
   counts_matrix[affected_genes, batch2_cols] <- round(counts_matrix[affected_genes, batch2_cols] * effect_multiplier)
   counts_matrix[affected_genes, batch3_cols] <- round(counts_matrix[affected_genes, batch3_cols] / effect_multiplier)
   
-  # Update the SummarizedExperiment object with the modified counts
   SummarizedExperiment::assay(se_object, "bulk_counts") <- counts_matrix
   
-  # Return the MODIFIED SummarizedExperiment object and batch info
-  return(list(se_with_batch = se_object, batch_info = batch_info))
+  # *** CHANGE: Return affected_genes as well ***
+  return(list(
+    se_with_batch = se_object, 
+    batch_info = batch_info, 
+    affected_genes = affected_genes
+  ))
 }
 
 
@@ -165,7 +160,7 @@ perform_pca_and_plot <- function(log_counts, batch_info, plot_title) {
   pc2_var <- round(pca_summary$importance[2, 2] * 100, 1)
   
   p <- ggplot2::ggplot(pca_data, ggplot2::aes(x = PC1, y = PC2, color = batch)) +
-    ggplot2::geom_point(size = 2, alpha = 0.8) +
+    ggplot2::geom_point(size = 1, alpha = 0.8) +
     ggplot2::labs(
       title = plot_title,
       x = paste0("PC1 (", pc1_var, "%)"),
@@ -176,4 +171,93 @@ perform_pca_and_plot <- function(log_counts, batch_info, plot_title) {
     ggplot2::coord_fixed()
   
   return(p)
+}
+
+#' Apply ComBat-Seq for Batch Correction
+#'
+#' Applies the ComBat-Seq algorithm from the sva package to correct for batch
+#' effects in raw count data. This wrapper handles the conversion from a potential
+#' sparse matrix to the dense matrix required by ComBat-Seq.
+#'
+#' @param raw_counts A matrix of non-normalized, integer counts (genes in rows, samples in columns).
+#'   Can be a standard or sparse matrix.
+#' @param batch_info A character or factor vector with batch information for each sample.
+#' @return A matrix of batch-corrected counts.
+#' @importFrom sva ComBat_seq
+run_combat_seq <- function(raw_counts, batch_info) {
+  # *** THE FIX: ComBat-Seq requires a standard dense matrix. ***
+  # Coerce the input to a standard matrix to ensure compatibility.
+  counts_matrix <- as.matrix(raw_counts)
+  
+  # ComBat-Seq requires a factor for the batch argument.
+  batch_factor <- as.factor(batch_info)
+  
+  # ComBat-Seq works on raw, integer counts.
+  # It returns a matrix of corrected counts.
+  corrected_counts <- sva::ComBat_seq(counts = counts_matrix, batch = batch_factor)
+  
+  return(corrected_counts)
+}
+
+#' Apply original ComBat for Batch Correction
+#'
+#' Applies the original ComBat algorithm, which expects log-transformed,
+#' normalized data (e.g., from microarrays or log-CPM from RNA-seq).
+#'
+#' @param log_counts A matrix of log-transformed counts.
+#' @param batch_info A character or factor vector with batch information.
+#' @return A matrix of batch-corrected log-transformed counts.
+#' @importFrom sva ComBat
+#' @importFrom stats model.matrix
+run_combat <- function(log_counts, batch_info) {
+  # ComBat expects a standard dense matrix.
+  log_counts_matrix <- as.matrix(log_counts)
+  batch_factor <- as.factor(batch_info)
+  
+  # Use an intercept-only model as there are no covariates to preserve.
+  # This is the 'mod' argument in ComBat.
+  mod_combat <- stats::model.matrix(~1, data = data.frame(batch = batch_factor))
+  
+  # Run ComBat on the log-transformed data
+  corrected_log_counts <- sva::ComBat(
+    dat = log_counts_matrix,
+    batch = batch_factor,
+    mod = mod_combat
+  )
+  
+  return(corrected_log_counts)
+}
+
+
+#' Apply RUVg from RUVSeq for Batch Correction
+#'
+#' Applies the RUVg algorithm, which uses control genes to estimate and remove
+#' unwanted variation. It operates on raw, integer counts.
+#'
+#' @param raw_counts A matrix of non-normalized, integer counts.
+#' @param control_genes A character vector of gene names to be used as controls.
+#' @param k An integer, the number of factors of unwanted variation to remove.
+#' @return A matrix of RUVg-normalized counts.
+#' @importFrom RUVSeq RUVg
+#' @importFrom EDASeq newSeqExpressionSet
+#' @importFrom BiocGenerics counts
+run_ruvg <- function(raw_counts, control_genes, k = 1) {
+  # RUVg requires a SeqExpressionSet object, which is created by a function
+  # in the EDASeq package.
+  counts_matrix <- round(as.matrix(raw_counts))
+  
+  # Filter for control genes that are present in the count matrix
+  valid_control_genes <- intersect(control_genes, rownames(counts_matrix))
+  if (length(valid_control_genes) == 0) {
+    stop("None of the provided control genes were found in the count matrix.")
+  }
+  
+  # *** THE FINAL FIX: Call newSeqExpressionSet from its source package, EDASeq. ***
+  set <- EDASeq::newSeqExpressionSet(counts = counts_matrix)
+  
+  # Run RUVg using the control genes to estimate factors of unwanted variation
+  set_normalized <- RUVSeq::RUVg(set, valid_control_genes, k = k)
+  
+  # Return the normalized count matrix
+  return(counts(set_normalized))
 }
