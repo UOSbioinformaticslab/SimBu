@@ -144,7 +144,7 @@ introduce_batch_effect <- function(sim_list, n_genes_affected = 150, effect_mult
 generate_log2cpm_boxplot <- function(tidy_logcpm_df) {
   
   # Ensure the order of methods is consistent for plotting
-  method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVg")
+  method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVg", "PCA Correction")
   plot_df <- tidy_logcpm_df
   plot_df$Method <- factor(plot_df$Method, levels = intersect(method_order, unique(plot_df$Method)))
   
@@ -211,6 +211,32 @@ perform_pca_and_plot <- function(log_counts = NULL, batch_info, plot_title, pca_
     ggplot2::coord_fixed()
   
   return(p)
+}
+
+#' Apply ComBat-ref for Batch Correction using a Reference Batch
+#'
+#' Applies the ComBat-ref algorithm, which adjusts data to a specified
+#' reference batch. Expects log-transformed, normalized data.
+#'
+#' @param log_counts A matrix of log-transformed counts.
+#' @param batch_info A character or factor vector with batch information.
+#' @param ref_batch A string specifying the name of the reference batch.
+#' @return A matrix of batch-corrected log-transformed counts.
+#' @importFrom Combat_ref Combat_ref
+run_combat_ref <- function(log_counts, batch_info, ref_batch) {
+  log_counts_matrix <- as.matrix(log_counts)
+  
+  # Combat_ref expects a factor for the batch argument.
+  batch_factor <- as.factor(batch_info)
+  
+  # Run Combat_ref on the log-transformed data
+  corrected_log_counts <- Combat_ref::Combat_ref(
+    dat = log_counts_matrix,
+    batch = batch_factor,
+    ref.batch = ref_batch
+  )
+  
+  return(corrected_log_counts)
 }
 
 #' Apply ComBat-Seq for Batch Correction
@@ -320,6 +346,51 @@ run_fastmnn <- function(log_counts, batch_info) {
   
   # Return as a data frame for easier handling
   return(as.data.frame(corrected_pcs))
+}
+
+#' Apply a PCA-based Batch Correction
+#'
+#' This method identifies principal components (PCs) that are significantly
+#' associated with batch and regresses them out of the expression data.
+#'
+#' @param log_counts A matrix of log-transformed counts.
+#' @param batch_info A character or factor vector with batch information.
+#' @param sig_threshold A numeric p-value threshold to identify significant PCs.
+#' @return A matrix of batch-corrected log-transformed counts.
+#' @importFrom stats prcomp aov
+#' @importFrom limma removeBatchEffect
+run_pca_correction <- function(log_counts, batch_info, sig_threshold = 0.01) {
+  # Perform PCA on the data
+  pca <- stats::prcomp(t(log_counts), scale. = TRUE)
+  
+  # Identify PCs significantly associated with batch
+  significant_pcs <- c()
+  for (i in 1:ncol(pca$x)) {
+    # Fit an ANOVA model: PC_i ~ batch
+    fit <- stats::aov(pca$x[, i] ~ as.factor(batch_info))
+    p_val <- summary(fit)[[1]][["Pr(>F)"]][1]
+    
+    # If the p-value is below the threshold, consider this PC batch-related
+    if (!is.na(p_val) && p_val < sig_threshold) {
+      significant_pcs <- c(significant_pcs, i)
+    }
+  }
+  
+  if (length(significant_pcs) == 0) {
+    warning("No principal components were found to be significantly associated with batch. Returning original data.")
+    return(log_counts)
+  }
+  
+  cat(paste0("Found ", length(significant_pcs), " PCs significantly associated with batch: ", paste(significant_pcs, collapse=", "), "\n"))
+  
+  # Extract the values of the significant PCs
+  batch_pcs <- pca$x[, significant_pcs, drop = FALSE]
+  
+  # Regress out the effect of these PCs from the original log-counts matrix.
+  # We use limma's function with the 'covariates' argument for this.
+  corrected_log_counts <- limma::removeBatchEffect(log_counts, covariates = batch_pcs)
+  
+  return(corrected_log_counts)
 }
 
 #' Calculate PERMANOVA R-squared for Batch Effect

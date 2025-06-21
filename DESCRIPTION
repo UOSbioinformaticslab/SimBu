@@ -1,0 +1,33 @@
+Package: SimBu
+Type: Package
+Title: Simulation and Batch Correction for Single-Cell RNA-seq Data
+Version: 0.1.0
+Authors@R: c(
+    person("Your Name", email = "your.email@example.com", role = c("aut", "cre"))
+)
+Description: This package provides tools for simulating single-cell RNA-seq data and evaluating batch correction methods. It includes functions for data generation, simulation, and various batch correction techniques.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Imports:
+    edgeR,
+    limma,
+    dplyr,
+    ggplot2,
+    patchwork,
+    SummarizedExperiment,
+    Matrix,
+    sva,
+    RUVSeq,
+    EDASeq,
+    vegan,
+    cluster,
+    tidyr,
+    knitr,
+    batchelor,
+    SingleCellExperiment,
+    cachem
+Suggests:
+    knitr,
+    rmarkdown
+RoxygenNote: 7.1.1

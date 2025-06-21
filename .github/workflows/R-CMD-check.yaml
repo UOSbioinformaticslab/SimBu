@@ -1,0 +1,27 @@
+name: R-CMD-check
+
+on: [push, pull_request]
+
+jobs:
+  R-CMD-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up R
+      uses: r-lib/actions/setup-r@v1
+
+    - name: Install dependencies
+      run: |
+        install.packages('devtools')
+        devtools::install_deps(dependencies = TRUE)
+
+    - name: Run R CMD check
+      run: |
+        R CMD build .
+        R CMD check --as-cran *.tar.gz
+
+    - name: Check for package coverage
+      run: Rscript -e 'covr::codecov()'

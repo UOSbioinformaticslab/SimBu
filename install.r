@@ -1,1 +1,0 @@
-remotes::install_github("nx10/httpgd")

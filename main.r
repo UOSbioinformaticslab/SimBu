@@ -124,6 +124,16 @@ metrics_list[["fastMNN"]] <- data.frame(
   Silhouette_Width = calculate_silhouette_width(pca_data = corrected_pcs_mnn, batch_info = batch_info)
 )
 
+# Method 6: PCA Correction
+cat("\n--- Running PCA-based Correction ---\n")
+log_counts_pca <- run_pca_correction(log_counts_before, batch_info)
+plots_list[["PCA Correction"]] <- perform_pca_and_plot(log_counts_pca, batch_info, "Post-Correction (PCA)")
+metrics_list[["PCA Correction"]] <- data.frame(
+  Method = "PCA Correction",
+  R_Squared = calculate_permanova_r2(log_counts_pca, batch_info),
+  Silhouette_Width = calculate_silhouette_width(log_counts_pca, batch_info)
+)
+
 # --- 6. Final Output ---
 
 # --- 6.1. Log2CPM Distribution Boxplots ---
@@ -135,7 +145,8 @@ logcpm_list <- list(
   "Limma" = log_counts_limma,
   "ComBat" = log_counts_combat,
   "ComBat-Seq" = log_counts_combat_seq,
-  "RUVg" = log_counts_ruvg
+  "RUVg" = log_counts_ruvg,
+  "PCA Correction" = log_counts_pca
 )
 
 # Create a sample-to-batch lookup table
@@ -172,9 +183,10 @@ log2cpm_boxplot <- generate_log2cpm_boxplot(full_tidy_df)
 print(log2cpm_boxplot)
 
 # --- 6.2. Visual PCA Comparison ---
-# Arrange the 6 plots into a 2x3 grid
+# Arrange the 7 plots (+ 2 spacers) into a 3x3 grid
 plot_panel <- (plots_list[[1]] | plots_list[[2]] | plots_list[[3]]) /
-  (plots_list[[4]] | plots_list[[5]] | plots_list[[6]])
+  (plots_list[[4]] | plots_list[[5]] | plots_list[[6]]) /
+  (plots_list[[7]] | plot_spacer() | plot_spacer())
 
 final_pca_plot <- plot_panel + 
   plot_layout(guides = 'collect') & 
@@ -197,7 +209,7 @@ metrics_melted <- tidyr::pivot_longer(
 )
 
 # Update the method order for plotting
-method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVg", "fastMNN")
+method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVg", "fastMNN", "PCA Correction")
 metrics_melted$Method <- factor(metrics_melted$Method, levels = method_order)
 
 metrics_plot <- ggplot(metrics_melted, aes(x = Method, y = Value, fill = Method)) +
