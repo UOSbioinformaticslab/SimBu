@@ -6,7 +6,7 @@
 #' and then loads them into the session.
 #'
 #' @param packages_to_install A character vector of package names.
-#' @return Invisible
+#' @return Invisible. This function is called for its side effect of loading packages.
 #' @importFrom BiocManager install
 install_and_load_packages <- function(packages_to_install) {
   # Ensure BiocManager is installed
@@ -133,39 +133,79 @@ introduce_batch_effect <- function(sim_list, n_genes_affected = 150, effect_mult
   ))
 }
 
+#' Generate Faceted Box Plots of Log2-CPM Values
+#'
+#' Creates a ggplot object showing box plots of Log2-CPM distributions,
+#' faceted by correction method and coloured by batch.
+#'
+#' @param tidy_logcpm_df A tidy data frame with columns: Method, Batch, and Log2CPM.
+#' @return A `ggplot` object.
+#' @importFrom ggplot2 ggplot aes geom_boxplot facet_wrap labs theme_bw theme element_text
+generate_log2cpm_boxplot <- function(tidy_logcpm_df) {
+  
+  # Ensure the order of methods is consistent for plotting
+  method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVg")
+  plot_df <- tidy_logcpm_df
+  plot_df$Method <- factor(plot_df$Method, levels = intersect(method_order, unique(plot_df$Method)))
+  
+  p <- ggplot(plot_df, aes(x = Batch, y = Log2CPM, fill = Batch)) +
+    # Use outlier.shape = NA to avoid a messy plot with tens of thousands of points
+    geom_boxplot(outlier.shape = NA) +
+    facet_wrap(~Method, scales = "free_y") +
+    labs(
+      title = "Distribution of Log2-CPM Values by Batch and Method",
+      subtitle = "Median-centered distributions indicate successful batch effect removal",
+      x = "Batch",
+      y = "Log2-CPM Value"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.background = element_rect(fill = "grey90"),
+      legend.position = "none" # The fill is redundant with the x-axis
+    )
+  
+  return(p)
+}
 
 #' Perform PCA and Generate a Plot
 #'
-#' Performs Principal Component Analysis (PCA) on log-transformed counts
-#' and creates a ggplot object to visualize the results.
+#' Performs PCA on log-counts OR uses pre-computed PCA data to create a ggplot object.
 #'
-#' @param log_counts A matrix of log-transformed counts (genes in rows, samples in columns).
-#' @param batch_info A character or factor vector with batch information for each sample.
+#' @param log_counts A matrix of log-transformed counts. Required if `pca_data` is NULL.
+#' @param batch_info A character or factor vector with batch information.
 #' @param plot_title A string for the plot title.
+#' @param pca_data A data frame with columns PC1, PC2, and batch. If provided, `log_counts` is ignored.
 #' @return A `ggplot` object.
-#' @importFrom edgeR cpm
 #' @importFrom stats prcomp
 #' @importFrom ggplot2 ggplot aes geom_point labs theme_bw scale_color_brewer coord_fixed
-perform_pca_and_plot <- function(log_counts, batch_info, plot_title) {
-  pca_result <- stats::prcomp(t(log_counts))
-  pca_summary <- summary(pca_result)
+perform_pca_and_plot <- function(log_counts = NULL, batch_info, plot_title, pca_data = NULL) {
+  if (is.null(pca_data)) {
+    # If no pre-computed PCs are given, calculate them.
+    pca_result <- stats::prcomp(t(log_counts))
+    pca_summary <- summary(pca_result)
+    
+    pc1_var <- round(pca_summary$importance[2, 1] * 100, 1)
+    pc2_var <- round(pca_summary$importance[2, 2] * 100, 1)
+    
+    plot_data <- data.frame(
+      PC1 = pca_result$x[, 1],
+      PC2 = pca_result$x[, 2],
+      batch = batch_info
+    )
+    
+    x_lab <- paste0("PC1 (", pc1_var, "%)")
+    y_lab <- paste0("PC2 (", pc2_var, "%)")
+  } else {
+    # Use the pre-computed PCs.
+    plot_data <- pca_data
+    x_lab <- "PC1" # We don't know the variance explained, so use generic labels
+    y_lab <- "PC2"
+  }
   
-  pca_data <- data.frame(
-    PC1 = pca_result$x[, 1],
-    PC2 = pca_result$x[, 2],
-    batch = batch_info
-  )
-  
-  pc1_var <- round(pca_summary$importance[2, 1] * 100, 1)
-  pc2_var <- round(pca_summary$importance[2, 2] * 100, 1)
-  
-  p <- ggplot2::ggplot(pca_data, ggplot2::aes(x = PC1, y = PC2, color = batch)) +
-    ggplot2::geom_point(size = 1, alpha = 0.8) +
-    ggplot2::labs(
-      title = plot_title,
-      x = paste0("PC1 (", pc1_var, "%)"),
-      y = paste0("PC2 (", pc2_var, "%)")
-    ) +
+  p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = PC1, y = PC2, color = batch)) +
+    ggplot2::geom_point(size = 2, alpha = 0.8) +
+    ggplot2::labs(title = plot_title, x = x_lab, y = y_lab) +
     ggplot2::theme_bw() +
     ggplot2::scale_color_brewer(palette = "Set1") +
     ggplot2::coord_fixed()
@@ -228,7 +268,6 @@ run_combat <- function(log_counts, batch_info) {
   return(corrected_log_counts)
 }
 
-
 #' Apply RUVg from RUVSeq for Batch Correction
 #'
 #' Applies the RUVg algorithm, which uses control genes to estimate and remove
@@ -260,4 +299,62 @@ run_ruvg <- function(raw_counts, control_genes, k = 1) {
   
   # Return the normalized count matrix
   return(counts(set_normalized))
+}
+
+#' Apply fastMNN for Batch Correction
+#'
+#' Applies the Mutual Nearest Neighbors (MNN) correction from the batchelor package.
+#' It returns the corrected principal components, not a corrected count matrix.
+#'
+#' @param log_counts A matrix of log-transformed counts.
+#' @param batch_info A character or factor vector with batch information.
+#' @return A data frame containing the corrected principal components for each sample.
+#' @importFrom batchelor fastMNN
+#' @importFrom SingleCellExperiment reducedDim
+run_fastmnn <- function(log_counts, batch_info) {
+  # fastMNN returns a SingleCellExperiment object
+  sce_corrected <- batchelor::fastMNN(log_counts, batch = as.factor(batch_info))
+  
+  # *** FIX: The 'reducedDim' accessor is in the SingleCellExperiment package ***
+  corrected_pcs <- SingleCellExperiment::reducedDim(sce_corrected, "corrected")
+  
+  # Return as a data frame for easier handling
+  return(as.data.frame(corrected_pcs))
+}
+
+#' Calculate PERMANOVA R-squared for Batch Effect
+#' @param log_counts A matrix of log-transformed counts. Optional if `pca_data` is provided.
+#' @param pca_data A data frame of principal components (samples in rows, PCs in columns).
+#' @return The R-squared value from the adonis test.
+#' @importFrom vegan vegdist adonis2
+calculate_permanova_r2 <- function(log_counts = NULL, batch_info, pca_data = NULL) {
+  if (is.null(pca_data)) {
+    dist_matrix <- vegan::vegdist(t(log_counts), method = "euclidean")
+  } else {
+    dist_matrix <- stats::dist(pca_data, method = "euclidean")
+  }
+  df <- data.frame(batch = as.factor(batch_info))
+  permanova_res <- vegan::adonis2(dist_matrix ~ batch, data = df)
+  return(permanova_res$R2[1])
+}
+
+#' Calculate Average Silhouette Width for Batches
+#' @param log_counts A matrix of log-transformed counts. Optional if `pca_data` is provided.
+#' @param pca_data A data frame of principal components (samples in rows, PCs in columns).
+#' @return The average silhouette width.
+#' @importFrom cluster silhouette
+#' @importFrom stats dist prcomp
+calculate_silhouette_width <- function(log_counts = NULL, batch_info, n_pcs = 5, pca_data = NULL) {
+  if (is.null(pca_data)) {
+    pca <- stats::prcomp(t(log_counts), scale. = TRUE)
+    pca_data_subset <- pca$x[, 1:n_pcs]
+  } else {
+    # Ensure we don't try to select more PCs than are available
+    max_pcs <- min(n_pcs, ncol(pca_data))
+    pca_data_subset <- pca_data[, 1:max_pcs]
+  }
+  
+  dist_matrix <- stats::dist(pca_data_subset)
+  sil <- cluster::silhouette(x = as.numeric(as.factor(batch_info)), dist = dist_matrix)
+  return(mean(sil[, "sil_width"]))
 }
