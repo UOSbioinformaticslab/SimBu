@@ -24,114 +24,170 @@ install_and_load_packages <- function(packages_to_install) {
   }
 }
 
-
-#' Create a Base Single-Cell Dataset
-#'
-#' Generates a synthetic single-cell dataset using the SimBu package structure.
-#'
-#' @param n_genes An integer, the number of genes.
-#' @param n_cells An integer, the number of cells.
-#' @return A `SimBu_dataset` S4 object containing synthetic data.
-#' @importFrom Matrix Matrix t
-#' @importFrom stats rpois
-create_base_sc_dataset <- function(n_genes = 1000, n_cells = 300) {
-  gene_names <- paste0("gene_", 1:n_genes)
-  cell_names <- paste0("cell_", 1:n_cells)
-  
-  # Create sparse matrices for efficiency
-  counts <- Matrix::Matrix(matrix(stats::rpois(n_genes * n_cells, 5), ncol = n_cells), sparse = TRUE)
-  rownames(counts) <- gene_names
-  colnames(counts) <- cell_names
-  
-  tpm <- Matrix::Matrix(matrix(stats::rpois(n_genes * n_cells, 5), ncol = n_cells), sparse = TRUE)
-  tpm <- Matrix::t(1e6 * Matrix::t(tpm) / Matrix::colSums(tpm))
-  rownames(tpm) <- gene_names
-  colnames(tpm) <- cell_names
-  
-  # Create cell annotations
-  annotation <- data.frame(
-    "ID" = cell_names,
-    "cell_type" = c(
-      rep("T cells CD4", 50), rep("T cells CD8", 50),
-      rep("Macrophages", 100), rep("NK cells", 10),
-      rep("B cells", 70), rep("Monocytes", 20)
-    )
-  )
-  
-  # Create the SimBu dataset object
-  simbu_ds <- SimBu::dataset(
-    annotation = annotation,
-    count_matrix = counts,
-    tpm_matrix = tpm,
-    name = "test_dataset"
-  )
-  return(simbu_ds)
+#' Sample from an empirical distribution
+sample_empirical <- function(x, n) {
+  sample(x, size = n, replace = TRUE)
 }
 
 
-#' Generate Bulk RNA-seq Simulations
+#' Clinical-calibrated Base Single-Cell Dataset
 #'
-#' Generates multiple batches of simulated bulk RNA-seq data from a single-cell dataset.
-#'
-#' @param simbu_dataset A `SimBu_dataset` object.
-#' @param n_sims An integer, the number of simulations (batches) to generate.
-#' @param n_samples_per_sim An integer, the number of samples in each simulation.
-#' @param n_cells_per_sample An integer, the number of cells to pool for each bulk sample.
-#' @return A list of `SimBu_simulation` objects.
-generate_simulations <- function(simbu_dataset, n_sims = 3, n_samples_per_sim = 30, n_cells_per_sample = 100) {
-  sim_list <- lapply(1:n_sims, function(i) {
-    SimBu::simulate_bulk(
-      data = simbu_dataset,
-      scenario = "random",
-      scaling_factor = "NONE",
-      ncells = n_cells_per_sample,
-      nsamples = n_samples_per_sim,
-      run_parallel = FALSE
+#' @param n_genes Number of genes to simulate.
+#' @param n_cells Number of cells to simulate.
+#' @param empirical_means Numeric vector of real gene mean expressions.
+#' @param empirical_libsizes Numeric vector of real total UMIs per cell.
+#' @param dropout_mid Midpoint for logistic dropout curve.
+#' @param donor_ids Vector of donor identifiers for patient variability.
+#' @return A SimBu_dataset with aligned count and TPM matrices and clinical realism.
+create_base_sc_dataset <- function(
+    n_genes            = 1000,
+    n_cells            = 300,
+    empirical_means,           # from real clinical data
+    empirical_libsizes,        # from real clinical data
+    dropout_mid       = 1,
+    donors            = paste0("Donor", 1:5)
+) {
+  # 1) Calibrate gene means & size factors from empirical distributions
+  gene_means   <- sample_empirical(empirical_means, n_genes)
+  size_factors <- sample_empirical(empirical_libsizes / mean(empirical_libsizes), n_cells)
+  
+  gene_names <- paste0("gene_", seq_len(n_genes))
+  cell_names <- paste0("cell_", seq_len(n_cells))
+  
+  # 2) Introduce donor-level effects
+  n_donors <- length(donors)
+  cells_per_donor <- ceiling(n_cells / n_donors)
+  donor_assign <- rep(donors, each = cells_per_donor)[seq_len(n_cells)]
+  # multiplicative effects per donor
+  donor_effects <- matrix(rnorm(n_genes * n_donors, mean = 1, sd = 0.2), nrow = n_genes)
+  colnames(donor_effects) <- donors
+  
+  # 3) Simulate counts with NB and dropout
+  lam <- outer(gene_means, size_factors)
+  counts <- matrix(0, nrow = n_genes, ncol = n_cells)
+  for (i in seq_len(n_cells)) {
+    mu_i <- lam[, i] * donor_effects[, donor_assign[i]]
+    raw_counts <- rnbinom(n_genes, mu = mu_i, size = 0.5)
+    # dropout probability logistic function
+    p_drop <- 1 / (1 + exp((log(mu_i + 1) - log(dropout_mid)) * 1.5))
+    kept <- rbinom(n_genes, 1, 1 - p_drop)
+    counts[, i] <- raw_counts * kept
+  }
+  counts <- Matrix::Matrix(counts, sparse = TRUE)
+  rownames(counts) <- gene_names; colnames(counts) <- cell_names
+  
+  # 4) Add ambient RNA contamination (~5% of reads)
+  ambient_prof <- gene_means / sum(gene_means)
+  lib_sizes <- Matrix::colSums(counts)
+  ambient_counts <- matrix(
+    stats::rmultinom(n_cells, size = round(0.05 * lib_sizes), prob = ambient_prof),
+    nrow = n_genes
+  )
+  counts <- counts + Matrix::Matrix(ambient_counts, sparse = TRUE)
+  
+  # 5) Compute TPM from counts
+  lib_sizes2 <- Matrix::colSums(counts)
+  raw_tpm <- Matrix::t(1e6 * Matrix::t(counts) / lib_sizes2)
+  tpm <- Matrix::Matrix(raw_tpm, sparse = TRUE)
+  rownames(tpm) <- gene_names; colnames(tpm) <- cell_names
+  
+  # 6) Annotate cells
+  annotation <- data.frame(
+    ID         = cell_names,
+    donor      = donor_assign,
+    cell_type  = sample(
+      c("T cells CD4", "T cells CD8", "Macrophages", "NK cells", "B cells", "Monocytes"),
+      size = n_cells, replace = TRUE,
+      prob = c(0.15, 0.15, 0.30, 0.05, 0.25, 0.10)
+    ),
+    stringsAsFactors = FALSE
+  )
+  
+  SimBu::dataset(
+    annotation   = annotation,
+    count_matrix = counts,
+    tpm_matrix   = tpm,
+    name         = "clinical_sc_dataset"
+  )
+}
+
+#' Filter to the top N cell-type–specific genes
+filter_genes_by_specificity <- function(simbu_ds, top_n = 200) {
+  counts_mat <- SummarizedExperiment::assay(simbu_ds, "counts")
+  cell_types <- SummarizedExperiment::colData(simbu_ds)$cell_type
+  types      <- unique(cell_types)
+  
+  mean_mat <- sapply(types, function(t) rowMeans(counts_mat[, cell_types == t, drop=FALSE]))
+  rownames(mean_mat) <- rownames(counts_mat)
+  spec_score <- apply(mean_mat, 1, function(x) max(x) / sum(x))
+  top_genes  <- names(sort(spec_score, decreasing = TRUE))[seq_len(min(top_n, length(spec_score)))]
+  
+  return(simbu_ds[top_genes, ])
+}
+
+#' Generate Bulk RNA-seq Simulations with Patient-level Heterogeneity
+generate_simulations <- function(
+    simbu_dataset,
+    n_sims            = 3,
+    n_samples_per_sim = 30,
+    n_cells_per_sample= 100
+) {
+  types <- unique(colData(simbu_dataset)$cell_type)
+  sim_list <- vector("list", n_sims)
+  
+  for (i in seq_len(n_sims)) {
+    # sample patient-level Dirichlet concentration
+    alpha_p <- pmax(rnorm(1, mean = 1, sd = 0.5), 0.1)
+    fracs   <- gtools::rdirichlet(n_samples_per_sim, rep(alpha_p, length(types)))
+    colnames(fracs) <- types
+    
+    sim_list[[i]] <- SimBu::simulate_bulk(
+      data                 = simbu_dataset,
+      scenario             = "custom",
+      custom_scenario_data = fracs,
+      scaling_factor       = "NONE",
+      ncells               = n_cells_per_sample,
+      nsamples             = n_samples_per_sim,
+      run_parallel         = FALSE
     )
-  })
+  }
   return(sim_list)
 }
 
-
 #' Merge Simulations and Introduce a Batch Effect
-#'
-#' Merges a list of simulations and manually introduces a batch effect
-#' to the count matrix for demonstration purposes.
-#'
-#' @param sim_list A list of `SimBu_simulation` objects.
-#' @param n_genes_affected An integer, the number of genes to be affected by the batch effect.
-#' @param effect_multiplier A numeric value for the batch effect strength.
-#' @return A list containing the modified `SummarizedExperiment` object (`se_with_batch`),
-#'         a character vector of batch information (`batch_info`), and the names of
-#'         the genes affected by the batch effect (`affected_genes`).
-#' @importFrom SummarizedExperiment assay `assay<-`
-introduce_batch_effect <- function(sim_list, n_genes_affected = 150, effect_multiplier = 2.5) {
+introduce_batch_effect <- function(sim_list,
+                                   n_genes_affected  = 50,
+                                   effect_multiplier = 7.0) {
   merged_list <- SimBu::merge_simulations(sim_list)
-  se_object <- merged_list$bulk
+  se_object   <- merged_list$bulk
   colnames(se_object) <- make.names(colnames(se_object), unique = TRUE)
   
-  counts_matrix <- SummarizedExperiment::assay(se_object, "bulk_counts")
-  n_samples_per_batch <- ncol(sim_list[[1]]$bulk)
-  batch_info <- rep(paste("Batch", 1:length(sim_list)), each = n_samples_per_batch)
+  counts_matrix <- assay(se_object, "bulk_counts")
+  n_per_batch   <- ncol(sim_list[[1]]$bulk)
+  batch_info    <- rep(paste0("Batch", seq_along(sim_list)), each = n_per_batch)
   
   set.seed(456)
   affected_genes <- sample(rownames(counts_matrix), n_genes_affected)
   
-  batch2_cols <- which(batch_info == "Batch 2")
-  batch3_cols <- which(batch_info == "Batch 3")
+  b2 <- which(batch_info == "Batch2"); b3 <- which(batch_info == "Batch3")
+  counts_matrix[affected_genes, b2] <- round(counts_matrix[affected_genes, b2] * effect_multiplier)
+  counts_matrix[affected_genes, b3] <- round(counts_matrix[affected_genes, b3] / effect_multiplier)
   
-  counts_matrix[affected_genes, batch2_cols] <- round(counts_matrix[affected_genes, batch2_cols] * effect_multiplier)
-  counts_matrix[affected_genes, batch3_cols] <- round(counts_matrix[affected_genes, batch3_cols] / effect_multiplier)
+  assay(se_object, "bulk_counts") <- counts_matrix
   
-  SummarizedExperiment::assay(se_object, "bulk_counts") <- counts_matrix
-  
-  # *** CHANGE: Return affected_genes as well ***
-  return(list(
-    se_with_batch = se_object, 
-    batch_info = batch_info, 
+  list(
+    se_with_batch  = se_object,
+    batch_info     = batch_info,
     affected_genes = affected_genes
-  ))
+  )
 }
+
+#' Native rarefaction (multinomial)
+rarefy_counts <- function(counts, depth) {
+  p <- counts / sum(counts)
+  as.numeric(rmultinom(1, size = depth, prob = p))
+}
+
 
 #' Generate Faceted Box Plots of Log2-CPM Values
 #'
@@ -172,45 +228,50 @@ generate_log2cpm_boxplot <- function(tidy_logcpm_df) {
 #'
 #' Performs PCA on log-counts OR uses pre-computed PCA data to create a ggplot object.
 #'
-#' @param log_counts A matrix of log-transformed counts. Required if `pca_data` is NULL.
+#' @param log_counts A matrix of log-transformed counts. Ignored if `pca_data` is provided.
 #' @param batch_info A character or factor vector with batch information.
 #' @param plot_title A string for the plot title.
-#' @param pca_data A data frame with columns PC1, PC2, and batch. If provided, `log_counts` is ignored.
+#' @param pca_data A matrix or data.frame of precomputed PCs (samples × components). If provided, `log_counts` is ignored.
 #' @return A `ggplot` object.
 #' @importFrom stats prcomp
 #' @importFrom ggplot2 ggplot aes geom_point labs theme_bw scale_color_brewer coord_fixed
-perform_pca_and_plot <- function(log_counts = NULL, batch_info, plot_title, pca_data = NULL) {
+perform_pca_and_plot <- function(log_counts = NULL,
+                                 batch_info,
+                                 plot_title,
+                                 pca_data = NULL) {
   if (is.null(pca_data)) {
-    # If no pre-computed PCs are given, calculate them.
-    pca_result <- stats::prcomp(t(log_counts))
-    pca_summary <- summary(pca_result)
-    
-    pc1_var <- round(pca_summary$importance[2, 1] * 100, 1)
-    pc2_var <- round(pca_summary$importance[2, 2] * 100, 1)
-    
-    plot_data <- data.frame(
-      PC1 = pca_result$x[, 1],
-      PC2 = pca_result$x[, 2],
-      batch = batch_info
+    # 1) compute PCA from log-counts
+    pca_res <- stats::prcomp(t(log_counts), scale. = TRUE)
+    # percent variance for axes
+    pct <- round(100 * summary(pca_res)$importance[2, 1:2], 1)
+    plot_df <- data.frame(
+      PC1   = pca_res$x[, 1],
+      PC2   = pca_res$x[, 2],
+      batch = batch_info,
+      check.names = FALSE
     )
+    x_lab <- paste0("PC1 (", pct[1], "%)")
+    y_lab <- paste0("PC2 (", pct[2], "%)")
     
-    x_lab <- paste0("PC1 (", pc1_var, "%)")
-    y_lab <- paste0("PC2 (", pc2_var, "%)")
   } else {
-    # Use the pre-computed PCs.
-    plot_data <- pca_data
-    x_lab <- "PC1" # We don't know the variance explained, so use generic labels
+    # 2) use the first two columns of the provided PC matrix/frame
+    plot_df <- data.frame(
+      PC1   = pca_data[, 1],
+      PC2   = pca_data[, 2],
+      batch = batch_info,
+      check.names = FALSE
+    )
+    x_lab <- "PC1"
     y_lab <- "PC2"
   }
   
-  p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = PC1, y = PC2, color = batch)) +
+  # now the scatter
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = PC1, y = PC2, color = batch)) +
     ggplot2::geom_point(size = 2, alpha = 0.8) +
     ggplot2::labs(title = plot_title, x = x_lab, y = y_lab) +
     ggplot2::theme_bw() +
     ggplot2::scale_color_brewer(palette = "Set1") +
     ggplot2::coord_fixed()
-  
-  return(p)
 }
 
 #' Apply ComBat-ref for Batch Correction using a Reference Batch
@@ -244,9 +305,8 @@ run_combat_ref <- function(log_counts, batch_info, ref_batch) {
 #' Applies the ComBat-Seq algorithm from the sva package to correct for batch
 #' effects in raw count data. This wrapper handles the conversion from a potential
 #' sparse matrix to the dense matrix required by ComBat-Seq.
-#'
 #' @param raw_counts A matrix of non-normalized, integer counts (genes in rows, samples in columns).
-#'   Can be a standard or sparse matrix.
+#' Can be a standard or sparse matrix.
 #' @param batch_info A character or factor vector with batch information for each sample.
 #' @return A matrix of batch-corrected counts.
 #' @importFrom sva ComBat_seq
@@ -269,14 +329,14 @@ run_combat_seq <- function(raw_counts, batch_info) {
 #'
 #' Applies the original ComBat algorithm, which expects log-transformed,
 #' normalized data (e.g., from microarrays or log-CPM from RNA-seq).
-#'
 #' @param log_counts A matrix of log-transformed counts.
 #' @param batch_info A character or factor vector with batch information.
+#' @param ref_batch Optional string specifying a reference batch. If provided, all other batches will be adjusted to match this reference to help avoid overcorrection.
 #' @return A matrix of batch-corrected log-transformed counts.
 #' @importFrom sva ComBat
 #' @importFrom stats model.matrix
-run_combat <- function(log_counts, batch_info) {
-  # ComBat expects a standard dense matrix.
+run_combat <- function(log_counts, batch_info, ref_batch = NULL) {
+  # ComBat expects standard dense matrix.
   log_counts_matrix <- as.matrix(log_counts)
   batch_factor <- as.factor(batch_info)
   
@@ -288,7 +348,8 @@ run_combat <- function(log_counts, batch_info) {
   corrected_log_counts <- sva::ComBat(
     dat = log_counts_matrix,
     batch = batch_factor,
-    mod = mod_combat
+    mod = mod_combat,
+    ref.batch = ref_batch
   )
   
   return(corrected_log_counts)
@@ -297,34 +358,37 @@ run_combat <- function(log_counts, batch_info) {
 #' Apply RUVg from RUVSeq for Batch Correction
 #'
 #' Applies the RUVg algorithm, which uses control genes to estimate and remove
-#' unwanted variation. It operates on raw, integer counts.
+#' unwanted variation.  It operates on raw, integer counts.
 #'
 #' @param raw_counts A matrix of non-normalized, integer counts.
 #' @param control_genes A character vector of gene names to be used as controls.
 #' @param k An integer, the number of factors of unwanted variation to remove.
-#' @return A matrix of RUVg-normalized counts.
-#' @importFrom RUVSeq RUVg
+#' @return A matrix of RUVg‐corrected counts.
 #' @importFrom EDASeq newSeqExpressionSet
-#' @importFrom BiocGenerics counts
+#' @importFrom RUVSeq RUVg
+#' @importFrom Biobase assayDataElement
 run_ruvg <- function(raw_counts, control_genes, k = 1) {
-  # RUVg requires a SeqExpressionSet object, which is created by a function
-  # in the EDASeq package.
+  # 1) round to integer
   counts_matrix <- round(as.matrix(raw_counts))
   
-  # Filter for control genes that are present in the count matrix
-  valid_control_genes <- intersect(control_genes, rownames(counts_matrix))
-  if (length(valid_control_genes) == 0) {
+  # 2) pick only the control genes that exist
+  valid_ctrl <- intersect(control_genes, rownames(counts_matrix))
+  if (length(valid_ctrl) == 0) {
     stop("None of the provided control genes were found in the count matrix.")
   }
   
-  # *** FIX: Call newSeqExpressionSet from its source package, EDASeq. ***
-  set <- EDASeq::newSeqExpressionSet(counts = counts_matrix)
+  # 3) build the SeqExpressionSet (counts go in the 'counts' slot)
+  seqset <- EDASeq::newSeqExpressionSet(counts = counts_matrix)
   
-  # Run RUVg using the control genes to estimate factors of unwanted variation
-  set_normalized <- RUVSeq::RUVg(set, valid_control_genes, k = k)
+  # 4) run RUVg – this returns a SeqExpressionSet with a 'normalizedCounts' assay
+  seqset_ruv <- RUVSeq::RUVg(x    = seqset,
+                             cIdx = valid_ctrl,
+                             k    = k)
   
-  # Return the normalized count matrix
-  return(counts(set_normalized))
+  # 5) extract the corrected counts matrix from the normalizedCounts slot
+  corrected <- Biobase::assayDataElement(seqset_ruv, "normalizedCounts")
+  
+  return(corrected)
 }
 
 #' Apply fastMNN for Batch Correction
@@ -393,39 +457,108 @@ run_pca_correction <- function(log_counts, batch_info, sig_threshold = 0.01) {
   return(corrected_log_counts)
 }
 
-#' Calculate PERMANOVA R-squared for Batch Effect
-#' @param log_counts A matrix of log-transformed counts. Optional if `pca_data` is provided.
-#' @param pca_data A data frame of principal components (samples in rows, PCs in columns).
-#' @return The R-squared value from the adonis test.
+#' Calculate PERMANOVA R-squared for a given variable (batch or biological group).
+#'
+#' @param log_counts Matrix of log-counts. Required if `pca_data` is NULL.
+#' @param variable_info A character or factor vector with the variable of interest (e.g., batch_info, group_info).
+#' @param pca_data Data frame with PCs. If provided, `log_counts` is ignored.
+#' @return The R-squared value from the adonis2 test.
 #' @importFrom vegan vegdist adonis2
-calculate_permanova_r2 <- function(log_counts = NULL, batch_info, pca_data = NULL) {
+calculate_permanova_r2 <- function(log_counts = NULL, variable_info, pca_data = NULL) {
   if (is.null(pca_data)) {
     dist_matrix <- vegan::vegdist(t(log_counts), method = "euclidean")
   } else {
     dist_matrix <- stats::dist(pca_data, method = "euclidean")
   }
-  df <- data.frame(batch = as.factor(batch_info))
-  permanova_res <- vegan::adonis2(dist_matrix ~ batch, data = df)
+  df <- data.frame(variable = as.factor(variable_info))
+  # PERMANOVA can fail if a group has only one member, so wrap in tryCatch
+  permanova_res <- tryCatch({
+    vegan::adonis2(dist_matrix ~ variable, data = df)
+  }, error = function(e) {
+    warning("PERMANOVA failed, likely due to a group having only one sample. Returning NA.")
+    return(NULL)
+  })
+  
+  if (is.null(permanova_res)) return(NA)
+  
   return(permanova_res$R2[1])
 }
 
-#' Calculate Average Silhouette Width for Batches
-#' @param log_counts A matrix of log-transformed counts. Optional if `pca_data` is provided.
-#' @param pca_data A data frame of principal components (samples in rows, PCs in columns).
-#' @return The average silhouette width.
+#' Calculate Average Silhouette Width for a given variable (batch or biological group).
+#'
+#' @param log_counts Matrix of log-counts. Required if `pca_data` is NULL.
+#' @param variable_info A character or factor vector with the variable of interest (e.g., batch_info, group_info).
+#' @param n_pcs Number of principal components to use for the calculation.
+#' @param pca_data Data frame with PCs. If provided, `log_counts` is ignored.
+#' @return The average silhouette width. For batch, lower is better. For biology, higher is better.
 #' @importFrom cluster silhouette
-#' @importFrom stats dist prcomp
-calculate_silhouette_width <- function(log_counts = NULL, batch_info, n_pcs = 5, pca_data = NULL) {
+#' @importFrom stats dist
+calculate_silhouette_width <- function(log_counts = NULL, variable_info, n_pcs = 5, pca_data = NULL) {
   if (is.null(pca_data)) {
+    # Ensure there are enough samples to compute PCs
+    if (ncol(log_counts) <= n_pcs) {
+      n_pcs <- ncol(log_counts) - 1
+    }
+    if (n_pcs < 2) {
+      warning("Not enough samples to compute multiple PCs for Silhouette Width. Returning NA.")
+      return(NA)
+    }
     pca <- stats::prcomp(t(log_counts), scale. = TRUE)
-    pca_data_subset <- pca$x[, 1:n_pcs]
+    pca_data_subset <- pca$x[, 1:n_pcs, drop = FALSE]
   } else {
-    # Ensure we don't try to select more PCs than are available
     max_pcs <- min(n_pcs, ncol(pca_data))
-    pca_data_subset <- pca_data[, 1:max_pcs]
+    pca_data_subset <- pca_data[, 1:max_pcs, drop = FALSE]
   }
   
   dist_matrix <- stats::dist(pca_data_subset)
-  sil <- cluster::silhouette(x = as.numeric(as.factor(batch_info)), dist = dist_matrix)
+  # Ensure there's more than one unique group
+  if (length(unique(variable_info)) < 2) {
+    warning("Silhouette width cannot be calculated with only one group. Returning NA.")
+    return(NA)
+  }
+  sil <- cluster::silhouette(x = as.numeric(as.factor(variable_info)), dist = dist_matrix)
+  
   return(mean(sil[, "sil_width"]))
+}
+
+#' Run kBET (k-Nearest Neighbor Batch Effect Test).
+#'
+#' Calculates the rejection rate of a chi-squared test for local batch mixing.
+#' A lower rejection rate indicates better batch integration.
+#'
+#' @param log_counts Matrix of log-counts. Required if `pca_data` is NULL.
+#' @param batch_info A character or factor vector with batch information.
+#' @param n_pcs Number of principal components to use for the calculation.
+#' @param pca_data Data frame with PCs. If provided, `log_counts` is ignored.
+#' @return The kBET rejection rate. Lower is better.
+#' @importFrom kbet kbet
+run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 10, pca_data = NULL) {
+  if (is.null(pca_data)) {
+    # kBET works best on PCs, so we compute them if not provided
+    if (ncol(log_counts) <= n_pcs) {
+      n_pcs <- ncol(log_counts) - 1
+    }
+    if (n_pcs < 2) {
+      warning("Not enough samples to compute multiple PCs for kBET. Returning NA.")
+      return(NA)
+    }
+    pca <- prcomp(t(log_counts), scale. = TRUE)
+    data_for_kbet <- pca$x[, 1:n_pcs]
+  } else {
+    max_pcs <- min(n_pcs, ncol(pca_data))
+    data_for_kbet <- pca_data[, 1:max_pcs]
+  }
+  
+  # kBET can fail if batches are too small, so we wrap it in a tryCatch
+  kbet_results <- tryCatch({
+    kbet::kbet(df = data_for_kbet, batch = batch_info, plot = FALSE)
+  }, error = function(e) {
+    warning("kBET failed, likely due to small batch size. Returning NA.")
+    return(NULL)
+  })
+  
+  if (is.null(kbet_results)) return(NA)
+  
+  # Return the observed rejection rate
+  return(kbet_results$summary$kbet.observed)
 }
