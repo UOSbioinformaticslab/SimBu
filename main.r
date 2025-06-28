@@ -3,14 +3,14 @@
 # --- 0. Setup ---
 source("functions.R")
 
-# Define high-level parameters
+# High-level parameters
 PACKAGES <- c(
   "SimBu", "limma",   "edgeR", "dplyr",  "ggplot2",
   "patchwork", "SummarizedExperiment", "Matrix",
   "sva",  "RUVSeq", "EDASeq", "vegan",
   "cluster", "tidyr", "knitr", "batchelor",
   "SingleCellExperiment", "gtools", "R.cache",
-  "matrixStats"   # <-- needed for rowVars()
+  "matrixStats"
 )
 NSAMPLES_PER_BATCH <- 30
 N_GENES            <- 1000

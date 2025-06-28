@@ -2,18 +2,17 @@
 
 #' Install and Load Required R Packages
 #'
-#' Checks if a list of packages is installed, installs them if they are not,
+#' Checks if listed packages are installed, installs them if they are not,
 #' and then loads them into the session.
 #'
-#' @param packages_to_install A character vector of package names.
-#' @return Invisible. This function is called for its side effect of loading packages.
+#' @param packages_to_install Character vector of package names.
+#' @return Function is called for its side effect of loading packages.
 #' @importFrom BiocManager install
 install_and_load_packages <- function(packages_to_install) {
   # Ensure BiocManager is installed
   if (!require("BiocManager", quietly = TRUE)) {
     install.packages("BiocManager")
   }
-  
   for (pkg in packages_to_install) {
     # Check for BioConductor/CRAN packages and install if not present
     if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
@@ -23,6 +22,8 @@ install_and_load_packages <- function(packages_to_install) {
     library(pkg, character.only = TRUE)
   }
 }
+
+
 
 #' Sample from an empirical distribution
 sample_empirical <- function(x, n) {
@@ -451,7 +452,7 @@ run_pca_correction <- function(log_counts, batch_info, sig_threshold = 0.01) {
   batch_pcs <- pca$x[, significant_pcs, drop = FALSE]
   
   # Regress out the effect of these PCs from the original log-counts matrix.
-  # We use limma's function with the 'covariates' argument for this.
+  # Use limma's function with the 'covariates' argument for this.
   corrected_log_counts <- limma::removeBatchEffect(log_counts, covariates = batch_pcs)
   
   return(corrected_log_counts)
@@ -523,11 +524,11 @@ calculate_silhouette_width <- function(log_counts = NULL, variable_info, n_pcs =
 
 #' Run kBET (k-Nearest Neighbor Batch Effect Test).
 #'
-#' Calculates the rejection rate of a chi-squared test for local batch mixing.
-#' A lower rejection rate indicates better batch integration.
+#' Calculates rejection rate of a chi-squared test for local batch mixing.
+#' Lower rejection rate indicates better batch integration.
 #'
 #' @param log_counts Matrix of log-counts. Required if `pca_data` is NULL.
-#' @param batch_info A character or factor vector with batch information.
+#' @param batch_info Character or factor vector with batch information.
 #' @param n_pcs Number of principal components to use for the calculation.
 #' @param pca_data Data frame with PCs. If provided, `log_counts` is ignored.
 #' @return The kBET rejection rate. Lower is better.
@@ -549,7 +550,7 @@ run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 10, pca_data = NULL)
     data_for_kbet <- pca_data[, 1:max_pcs]
   }
   
-  # kBET can fail if batches are too small, so we wrap it in a tryCatch
+  # kBET can fail if batches are too small, so we wrap in a tryCatch
   kbet_results <- tryCatch({
     kbet::kbet(df = data_for_kbet, batch = batch_info, plot = FALSE)
   }, error = function(e) {
@@ -559,6 +560,6 @@ run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 10, pca_data = NULL)
   
   if (is.null(kbet_results)) return(NA)
   
-  # Return the observed rejection rate
+  # Return observed rejection rate
   return(kbet_results$summary$kbet.observed)
 }
