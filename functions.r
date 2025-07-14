@@ -55,6 +55,10 @@ create_base_sc_dataset <- function(
   gene_names <- paste0("gene_", seq_len(n_genes))
   cell_names <- paste0("cell_", seq_len(n_cells))
   
+  # --- FIX: Re-introduce the definition of 'lam' ---
+  # 'lam' is the base expression rate (gene_mean * size_factor)
+  lam <- outer(gene_means, size_factors, "*")
+  
   # 2) Introduce donor-level effects
   n_donors <- length(donors)
   cells_per_donor <- ceiling(n_cells / n_donors)
@@ -62,17 +66,29 @@ create_base_sc_dataset <- function(
   donor_effects <- matrix(rnorm(n_genes * n_donors, mean = 1, sd = 0.2), nrow = n_genes)
   colnames(donor_effects) <- donors
   
-  # 3) Simulate counts with NB and dropout
-  lam <- outer(gene_means, size_factors)
-  counts <- matrix(0, nrow = n_genes, ncol = n_cells)
-  for (i in seq_len(n_cells)) {
-    mu_i <- lam[, i] * donor_effects[, donor_assign[i]]
-    # Use the dispersion parameter; the 'size' argument is 1/dispersion.
-    raw_counts <- rnbinom(n_genes, mu = mu_i, size = 1 / dispersion)
-    p_drop <- 1 / (1 + exp((log(mu_i + 1) - log(dropout_mid)) * 1.5))
-    kept <- rbinom(n_genes, 1, 1 - p_drop)
-    counts[, i] <- raw_counts * kept
-  }
+  # 3) Simulate counts with NB and dropout (Vectorized)
+  # Create the full mu matrix by multiplying base rates by donor effects
+  mu_matrix <- lam * donor_effects[, donor_assign]
+  
+  # Simulate all counts at once
+  raw_counts_matrix <- matrix(
+    rnbinom(n_genes * n_cells, mu = mu_matrix, size = 1 / dispersion),
+    nrow = n_genes,
+    ncol = n_cells
+  )
+  
+  # Calculate all dropout probabilities at once
+  p_drop_matrix <- 1 / (1 + exp((log(mu_matrix + 1) - log(dropout_mid)) * 1.5))
+  
+  # Simulate all dropout events at once
+  kept_matrix <- matrix(
+    rbinom(n_genes * n_cells, 1, 1 - p_drop_matrix),
+    nrow = n_genes,
+    ncol = n_cells
+  )
+  
+  # Apply dropout
+  counts <- raw_counts_matrix * kept_matrix
   counts <- Matrix::Matrix(counts, sparse = TRUE)
   rownames(counts) <- gene_names; colnames(counts) <- cell_names
   

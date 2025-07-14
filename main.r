@@ -236,12 +236,13 @@ best_k_rg <- ruvg_metrics_df$k[which.min(ruvg_metrics_df$R2)]
 corr_rg   <- run_ruvg(counts_with_effect, ctrl_genes, k = best_k_rg)
 log_rg    <- edgeR::cpm(corr_rg, log = TRUE, prior.count = 1)
 
-# d) Store in lists under "RUVg"
-plots_list$RUVg <- perform_pca_and_plot(
-  log_rg, batch_info, paste0("RUVg (k=", best_k_rg, ")")
+# d) Store in lists under a dynamic name
+ruvg_method_name <- paste0("RUVg (k=", best_k_rg, ")")
+plots_list[[ruvg_method_name]] <- perform_pca_and_plot(
+  log_rg, batch_info, ruvg_method_name
 )
-metrics_list$RUVg <- data.frame(
-  Method           = paste0("RUVg (k=", best_k_rg, ")"),
+metrics_list[[ruvg_method_name]] <- data.frame(
+  Method           = ruvg_method_name,
   R_Squared        = calculate_permanova_r2(log_rg, batch_info),
   Silhouette_Width = calculate_silhouette_width(log_rg, batch_info)
 )
@@ -308,11 +309,22 @@ rows <- lapply(names(method_outputs), function(key) {
   }
   
   is_pca_data <- out$type == "pca"
-  log_counts_data <- if (!is_pca_data) out$mat else NULL
-  pca_data_input  <- if (is_pca_data) out$mat else NULL
+  
+  # --- OPTIMIZATION: Pre-compute PCA once if needed ---
+  if (is_pca_data) {
+    pca_data_input <- out$mat
+    log_counts_data <- NULL
+  } else {
+    log_counts_data <- out$mat
+    # Check for low variance columns before PCA
+    variances <- matrixStats::colVars(t(log_counts_data))
+    if(any(variances < 1e-6)) {
+       warning(paste("Low variance samples detected in method:", key, ". kBET or other metrics might fail."))
+    }
+    pca_data_input <- stats::prcomp(t(log_counts_data), scale. = TRUE)$x
+  }
   
   kbet_val <- run_kbet(
-    log_counts = log_counts_data,
     pca_data   = pca_data_input,
     batch_info = batch_info
   )
@@ -351,7 +363,8 @@ logcpm_list <- list(
   "Limma"          = log_limma,
   "ComBat"         = log_combat,
   "ComBat-Seq"     = log_seq,
-  "RUVs"           = log_best, 
+  ruvs_method_name = log_best,
+  ruvg_method_name = log_rg,
   "PCA Correction" = log_pca
 )
 sample_info <- data.frame(Sample_ID = colnames(log_counts_before),
@@ -366,6 +379,10 @@ tidy_df_list <- lapply(names(logcpm_list), function(meth) {
     dplyr::left_join(sample_info, by="Sample_ID")
 })
 full_tidy_df <- dplyr::bind_rows(tidy_df_list)
+cat("Number of NA values in full_tidy_df:\n")
+print(colSums(is.na(full_tidy_df)))
+cat("Rows with NA values:\n")
+print(full_tidy_df[!complete.cases(full_tidy_df), ])
 print(generate_log2cpm_boxplot(full_tidy_df))
 
 ## 7.2 PCA Grid
@@ -377,17 +394,28 @@ print(plot_panel + plot_layout(guides='collect') &
 
 ## 7.3 Metrics Barplot
 metrics_df <- do.call(rbind, metrics_list)
+
+# Filter out methods to exclude from plot due to scaling issues
+metrics_to_plot <- dplyr::filter(
+  metrics_df,
+  !Method %in% c("Pre-Correction", ruvs_method_name)
+)
+
 metrics_melted <- tidyr::pivot_longer(
-  metrics_df, cols = c("R_Squared","Silhouette_Width"),
+  metrics_to_plot, cols = c("R_Squared","Silhouette_Width"),
   names_to="Metric", values_to="Value"
+)
+
+# Ensure the order of methods in the plot is consistent
+all_method_names <- c(
+  # "Pre-Correction", 
+  "Limma", "ComBat", "ComBat-Seq",
+  # ruvs_method_name, 
+  ruvg_method_name, "fastMNN", "PCA Correction"
 )
 metrics_melted$Method <- factor(
   metrics_melted$Method,
-  levels = c(
-    "Pre-Correction","Limma","ComBat",
-    "ComBat-Seq",paste0("RUVs (k=",best_k,")"),
-    "fastMNN","PCA Correction"
-  )
+  levels = all_method_names
 )
 print(ggplot2::ggplot(
   metrics_melted, aes(x=Method,y=Value,fill=Method)
