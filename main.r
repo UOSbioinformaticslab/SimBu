@@ -278,6 +278,8 @@ method_outputs <- list(
   
   # Add the data for the dynamically-named methods
   list(type="log", mat=log_best), # This will be named for RUVs
+
+  list(type="log", mat=log_rg),   # This will be named for RUVg
   
   fastMNN      = list(type="pca", mat=pcs_mnn),
   
@@ -289,6 +291,7 @@ method_outputs <- list(
 names(method_outputs) <- c(
   "Pre", "Limma", "ComBat", "ComBat-Seq",
   ruvs_method_name, # The name created in section 5.4, e.g., "RUVs (k=1)"
+  "RUVg",           # The name for RUVg method
   "fastMNN",
   pca_method_name   # The name created in section 5.6, "PCA Correction"
 )
@@ -348,7 +351,7 @@ logcpm_list <- list(
   "Limma"          = log_limma,
   "ComBat"         = log_combat,
   "ComBat-Seq"     = log_seq,
-  "RUVs"           = log_best,
+  "RUVs"           = log_best, 
   "PCA Correction" = log_pca
 )
 sample_info <- data.frame(Sample_ID = colnames(log_counts_before),
