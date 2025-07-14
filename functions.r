@@ -1,18 +1,19 @@
-# R/functions.R
+R_REMOTES_STANDALONE=TRUE
 
 #' Install and Load Required R Packages
 #'
-#' Checks if listed packages are installed, installs them if they are not,
+#' Checks if a list of packages is installed, installs them if they are not,
 #' and then loads them into the session.
 #'
-#' @param packages_to_install Character vector of package names.
-#' @return Function is called for its side effect of loading packages.
+#' @param packages_to_install A character vector of package names.
+#' @return Invisible. This function is called for its side effect of loading packages.
 #' @importFrom BiocManager install
 install_and_load_packages <- function(packages_to_install) {
   # Ensure BiocManager is installed
   if (!require("BiocManager", quietly = TRUE)) {
     install.packages("BiocManager")
   }
+  
   for (pkg in packages_to_install) {
     # Check for BioConductor/CRAN packages and install if not present
     if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
@@ -22,8 +23,6 @@ install_and_load_packages <- function(packages_to_install) {
     library(pkg, character.only = TRUE)
   }
 }
-
-
 
 #' Sample from an empirical distribution
 sample_empirical <- function(x, n) {
@@ -43,10 +42,11 @@ sample_empirical <- function(x, n) {
 create_base_sc_dataset <- function(
     n_genes            = 1000,
     n_cells            = 300,
-    empirical_means,           # from real clinical data
-    empirical_libsizes,        # from real clinical data
-    dropout_mid       = 1,
-    donors            = paste0("Donor", 1:5)
+    empirical_means,
+    empirical_libsizes,
+    dropout_mid        = 1,
+    donors             = paste0("Donor", 1:5),
+    dispersion         = 0.2
 ) {
   # 1) Calibrate gene means & size factors from empirical distributions
   gene_means   <- sample_empirical(empirical_means, n_genes)
@@ -59,7 +59,6 @@ create_base_sc_dataset <- function(
   n_donors <- length(donors)
   cells_per_donor <- ceiling(n_cells / n_donors)
   donor_assign <- rep(donors, each = cells_per_donor)[seq_len(n_cells)]
-  # multiplicative effects per donor
   donor_effects <- matrix(rnorm(n_genes * n_donors, mean = 1, sd = 0.2), nrow = n_genes)
   colnames(donor_effects) <- donors
   
@@ -68,8 +67,8 @@ create_base_sc_dataset <- function(
   counts <- matrix(0, nrow = n_genes, ncol = n_cells)
   for (i in seq_len(n_cells)) {
     mu_i <- lam[, i] * donor_effects[, donor_assign[i]]
-    raw_counts <- rnbinom(n_genes, mu = mu_i, size = 0.5)
-    # dropout probability logistic function
+    # Use the dispersion parameter; the 'size' argument is 1/dispersion.
+    raw_counts <- rnbinom(n_genes, mu = mu_i, size = 1 / dispersion)
     p_drop <- 1 / (1 + exp((log(mu_i + 1) - log(dropout_mid)) * 1.5))
     kept <- rbinom(n_genes, 1, 1 - p_drop)
     counts[, i] <- raw_counts * kept
@@ -80,14 +79,27 @@ create_base_sc_dataset <- function(
   # 4) Add ambient RNA contamination (~5% of reads)
   ambient_prof <- gene_means / sum(gene_means)
   lib_sizes <- Matrix::colSums(counts)
-  ambient_counts <- matrix(
-    stats::rmultinom(n_cells, size = round(0.05 * lib_sizes), prob = ambient_prof),
-    nrow = n_genes
-  )
-  counts <- counts + Matrix::Matrix(ambient_counts, sparse = TRUE)
+  # Prevent errors if some cells have zero counts
+  valid_libs <- lib_sizes > 0
+  if(any(valid_libs)){
+    ambient_counts <- matrix(0, nrow = n_genes, ncol = n_cells)
+    # Ensure rmultinom gets a single size value or a vector of the correct length
+    ambient_sizes <- round(0.05 * lib_sizes[valid_libs])
+    if(length(ambient_sizes) > 0) {
+      ambient_counts[, valid_libs] <- stats::rmultinom(
+        n = length(ambient_sizes),
+        size = ambient_sizes,
+        prob = ambient_prof
+      )
+    }
+    counts <- counts + Matrix::Matrix(ambient_counts, sparse = TRUE)
+  }
+  
   
   # 5) Compute TPM from counts
   lib_sizes2 <- Matrix::colSums(counts)
+  # Avoid division by zero for cells that might have zero counts after all steps
+  lib_sizes2[lib_sizes2 == 0] <- 1
   raw_tpm <- Matrix::t(1e6 * Matrix::t(counts) / lib_sizes2)
   tpm <- Matrix::Matrix(raw_tpm, sparse = TRUE)
   rownames(tpm) <- gene_names; colnames(tpm) <- cell_names
@@ -201,7 +213,7 @@ rarefy_counts <- function(counts, depth) {
 generate_log2cpm_boxplot <- function(tidy_logcpm_df) {
   
   # Ensure the order of methods is consistent for plotting
-  method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVg", "PCA Correction")
+  method_order <- c("Pre-Correction", "Limma", "ComBat", "ComBat-Seq", "RUVs", "RUVg", "PCA Correction", "fastMNN")
   plot_df <- tidy_logcpm_df
   plot_df$Method <- factor(plot_df$Method, levels = intersect(method_order, unique(plot_df$Method)))
   
@@ -312,8 +324,7 @@ run_combat_ref <- function(log_counts, batch_info, ref_batch) {
 #' @return A matrix of batch-corrected counts.
 #' @importFrom sva ComBat_seq
 run_combat_seq <- function(raw_counts, batch_info) {
-  # *** THE FIX: ComBat-Seq requires a standard dense matrix. ***
-  # Coerce the input to a standard matrix to ensure compatibility.
+  # ComBat-Seq requires a standard dense matrix.
   counts_matrix <- as.matrix(raw_counts)
   
   # ComBat-Seq requires a factor for the batch argument.
@@ -342,7 +353,6 @@ run_combat <- function(log_counts, batch_info, ref_batch = NULL) {
   batch_factor <- as.factor(batch_info)
   
   # Use an intercept-only model as there are no covariates to preserve.
-  # This is the 'mod' argument in ComBat.
   mod_combat <- stats::model.matrix(~1, data = data.frame(batch = batch_factor))
   
   # Run ComBat on the log-transformed data
@@ -356,41 +366,85 @@ run_combat <- function(log_counts, batch_info, ref_batch = NULL) {
   return(corrected_log_counts)
 }
 
-#' Apply RUVg from RUVSeq for Batch Correction
+#' Apply RUVs from RUVSeq with Upper‐Quartile Normalization
 #'
-#' Applies the RUVg algorithm, which uses control genes to estimate and remove
-#' unwanted variation.  It operates on raw, integer counts.
+#' Uses between‐lane UQ normalization then RUVs to remove unwanted variation using sample replicates.
 #'
-#' @param raw_counts A matrix of non-normalized, integer counts.
-#' @param control_genes A character vector of gene names to be used as controls.
-#' @param k An integer, the number of factors of unwanted variation to remove.
-#' @return A matrix of RUVg‐corrected counts.
-#' @importFrom EDASeq newSeqExpressionSet
-#' @importFrom RUVSeq RUVg
+#' @param raw_counts Integer matrix (genes × samples).
+#' @param control_genes Character vector of negative‐control gene names.
+#' @param scIdx Integer matrix of replicate‐set sample indices (rows = sets, cols = max size; pad with -1).
+#' @param k Numeric, number of unwanted factors to estimate.
+#' @return A list with:
+#'   - `corrected`: numeric matrix of RUV‐normalized counts
+#'   - `k`: the k used
+#' @importFrom EDASeq newSeqExpressionSet betweenLaneNormalization
+#' @importFrom RUVSeq RUVs
 #' @importFrom Biobase assayDataElement
+run_ruvs <- function(raw_counts, control_genes, scIdx, k = 1) {
+  # 1) Round & coerce
+  counts_mat <- round(as.matrix(raw_counts))
+  # 2) Build SeqExpressionSet
+  seqset     <- EDASeq::newSeqExpressionSet(counts = counts_mat)
+  # 3) UQ normalization
+  seqset_uq  <- EDASeq::betweenLaneNormalization(seqset, which = "upper")
+  # 4) Subset controls
+  valid_ctrl <- intersect(control_genes, rownames(counts_mat))
+  if (!length(valid_ctrl)) stop("No control genes found.")
+  # 5) Run RUVs
+  out        <- RUVSeq::RUVs(
+    x     = seqset_uq,
+    cIdx  = valid_ctrl,
+    k     = as.numeric(k),
+    scIdx = scIdx
+  )
+  # 6) Extract the 'normalizedCounts' assay
+  corrected <- Biobase::assayDataElement(out, "normalizedCounts")
+  list(corrected = corrected, k = k)
+}
+
+#' Apply RUVg from RUVSeq with Upper‐Quartile Normalization
+#'
+#' Uses between‐lane UQ normalization then RUVg to remove unwanted variation
+#' using control genes. It does not use replicate information.
+#'
+#' @param raw_counts Integer matrix (genes × samples).
+#' @param control_genes Character vector of negative‐control gene names.
+#' @param k Numeric, number of unwanted factors to estimate.
+#' @return A numeric matrix of RUVg‐normalized counts.
+#' @importFrom EDASeq newSeqExpressionSet betweenLaneNormalization
+#' @importFrom RUVSeq RUVg
+#' @importFrom Biobase assayDataElement pData 'pData<-' AnnotatedDataFrame
 run_ruvg <- function(raw_counts, control_genes, k = 1) {
-  # 1) round to integer
-  counts_matrix <- round(as.matrix(raw_counts))
+  # 1) Round & coerce to a standard matrix
+  counts_mat <- round(as.matrix(raw_counts))
   
-  # 2) pick only the control genes that exist
-  valid_ctrl <- intersect(control_genes, rownames(counts_matrix))
+  # 2) Build SeqExpressionSet. RUVg needs pData to exist.
+  pheno_data <- data.frame(row.names = colnames(counts_mat),
+                           dummy_var = rep(1, ncol(counts_mat)))
+  seqset     <- EDASeq::newSeqExpressionSet(counts = counts_mat,
+                                            phenoData = as(pheno_data, "AnnotatedDataFrame"))
+  
+  # 3) UQ normalization
+  seqset_uq  <- EDASeq::betweenLaneNormalization(seqset, which = "upper")
+  
+  # 4) Ensure control genes are present in the data
+  valid_ctrl <- intersect(control_genes, rownames(counts_mat))
   if (length(valid_ctrl) == 0) {
-    stop("None of the provided control genes were found in the count matrix.")
+    stop("No control genes provided were found in the dataset for RUVg.")
   }
   
-  # 3) build the SeqExpressionSet (counts go in the 'counts' slot)
-  seqset <- EDASeq::newSeqExpressionSet(counts = counts_matrix)
+  # 5) Run RUVg using control genes
+  out <- RUVSeq::RUVg(
+    x    = seqset_uq,
+    cIdx = valid_ctrl,
+    k    = as.numeric(k)
+  )
   
-  # 4) run RUVg – this returns a SeqExpressionSet with a 'normalizedCounts' assay
-  seqset_ruv <- RUVSeq::RUVg(x    = seqset,
-                             cIdx = valid_ctrl,
-                             k    = k)
-  
-  # 5) extract the corrected counts matrix from the normalizedCounts slot
-  corrected <- Biobase::assayDataElement(seqset_ruv, "normalizedCounts")
-  
+  # 6) Extract the 'normalizedCounts' assay
+  corrected <- Biobase::assayDataElement(out, "normalizedCounts")
   return(corrected)
 }
+
 
 #' Apply fastMNN for Batch Correction
 #'
@@ -406,7 +460,7 @@ run_fastmnn <- function(log_counts, batch_info) {
   # fastMNN returns a SingleCellExperiment object
   sce_corrected <- batchelor::fastMNN(log_counts, batch = as.factor(batch_info))
   
-  # *** FIX: The 'reducedDim' accessor is in the SingleCellExperiment package ***
+  # The 'reducedDim' accessor is in the SingleCellExperiment package
   corrected_pcs <- SingleCellExperiment::reducedDim(sce_corrected, "corrected")
   
   # Return as a data frame for easier handling
@@ -452,7 +506,6 @@ run_pca_correction <- function(log_counts, batch_info, sig_threshold = 0.01) {
   batch_pcs <- pca$x[, significant_pcs, drop = FALSE]
   
   # Regress out the effect of these PCs from the original log-counts matrix.
-  # Use limma's function with the 'covariates' argument for this.
   corrected_log_counts <- limma::removeBatchEffect(log_counts, covariates = batch_pcs)
   
   return(corrected_log_counts)
@@ -522,44 +575,111 @@ calculate_silhouette_width <- function(log_counts = NULL, variable_info, n_pcs =
   return(mean(sil[, "sil_width"]))
 }
 
-#' Run kBET (k-Nearest Neighbor Batch Effect Test).
-#'
-#' Calculates rejection rate of a chi-squared test for local batch mixing.
-#' Lower rejection rate indicates better batch integration.
-#'
-#' @param log_counts Matrix of log-counts. Required if `pca_data` is NULL.
-#' @param batch_info Character or factor vector with batch information.
-#' @param n_pcs Number of principal components to use for the calculation.
-#' @param pca_data Data frame with PCs. If provided, `log_counts` is ignored.
-#' @return The kBET rejection rate. Lower is better.
-#' @importFrom kbet kbet
-run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 10, pca_data = NULL) {
+#' Run kBET (k-Nearest Neighbour Batch Effect Test).
+#' @param log_counts A matrix of log-transformed data, used if pca_data is NULL.
+#' @param batch_info A character or factor vector with batch information.
+#' @param n_pcs Number of principal components to use.
+#' @param pca_data A pre-computed matrix of PCs (samples x PCs).
+#' @return The observed kBET rejection rate (0 to 1). Lower is better.
+#' @importFrom kBET kBET
+run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 15, pca_data = NULL) {
   if (is.null(pca_data)) {
-    # kBET works best on PCs, so we compute them if not provided
-    if (ncol(log_counts) <= n_pcs) {
-      n_pcs <- ncol(log_counts) - 1
-    }
-    if (n_pcs < 2) {
-      warning("Not enough samples to compute multiple PCs for kBET. Returning NA.")
+    if (ncol(log_counts) <= n_pcs) n_pcs <- ncol(log_counts) - 1
+    if (n_pcs < 2 || nrow(log_counts) < n_pcs) {
+      warning("Not enough samples/features for kBET. Returning NA.")
       return(NA)
     }
-    pca <- prcomp(t(log_counts), scale. = TRUE)
-    data_for_kbet <- pca$x[, 1:n_pcs]
+    pca <- stats::prcomp(t(log_counts), scale. = TRUE)
+    data_for_kbet <- pca$x[, 1:n_pcs, drop = FALSE]
   } else {
     max_pcs <- min(n_pcs, ncol(pca_data))
-    data_for_kbet <- pca_data[, 1:max_pcs]
+    if (max_pcs < 2) {
+      warning("Not enough PCs for kBET. Returning NA.")
+      return(NA)
+    }
+    data_for_kbet <- pca_data[, 1:max_pcs, drop = FALSE]
   }
+  min_batch_size <- min(table(batch_info))
+  if (min_batch_size <= 10) {
+    warning(paste("kBET cannot run: smallest batch is", min_batch_size, "(<=10). Returning NA."))
+    return(NA)
+  }
+  k0 <- max(10, floor(min_batch_size * 0.25))
+  if (k0 >= min_batch_size) k0 <- min_batch_size - 1
   
-  # kBET can fail if batches are too small, so we wrap in a tryCatch
   kbet_results <- tryCatch({
-    kbet::kbet(df = data_for_kbet, batch = batch_info, plot = FALSE)
+    kBET::kBET(df = data_for_kbet, batch = batch_info, k0 = k0, plot = FALSE, verbose = FALSE)
   }, error = function(e) {
-    warning("kBET failed, likely due to small batch size. Returning NA.")
+    warning(paste("kBET failed with k0 =", k0, ". Error:", e$message, ". Returning NA."))
     return(NULL)
   })
   
   if (is.null(kbet_results)) return(NA)
   
-  # Return observed rejection rate
-  return(kbet_results$summary$kbet.observed)
+  return(kbet_results$summary$kBET.observed)
 }
+
+
+
+# Function to map a bibentry object to RIS lines
+bibentry_to_ris <- function(b) {
+  # helper to format authors
+  format_authors <- function(auth) {
+    names <- paste(auth$family, auth$given, sep = ", ")
+    unlist(lapply(names, function(x) paste0("AU  - ", x)))
+  }
+  
+  # ensure we have a single, character type string
+  type_key <- as.character(b$bibtype)[1]
+  
+  # determine RIS type from that single key
+  ris_type <- switch(type_key,
+                     Article   = "JOUR",
+                     Book      = "BOOK",
+                     Manual    = "MANUAL",
+                     Software  = "COMP",
+                     Online    = "ELEC",
+                     "GEN"     # generic fallback
+  )
+  
+  out <- c(sprintf("TY  - %s", ris_type))
+  
+  if (!is.null(b$title))
+    out <- c(out, sprintf("TI  - %s", b$title))
+  if (!is.null(b$author))
+    out <- c(out, format_authors(b$author))
+  if (!is.null(b$year))
+    out <- c(out, sprintf("PY  - %s", b$year))
+  if (!is.null(b$journal))
+    out <- c(out, sprintf("JO  - %s", b$journal))
+  if (!is.null(b$publisher))
+    out <- c(out, sprintf("PB  - %s", b$publisher))
+  if (!is.null(b$volume))
+    out <- c(out, sprintf("VL  - %s", b$volume))
+  if (!is.null(b$issue))
+    out <- c(out, sprintf("IS  - %s", b$issue))
+  if (!is.null(b$pages))
+    out <- c(out, sprintf("SP  - %s", b$pages))
+  if (!is.null(b$url))
+    out <- c(out, sprintf("UR  - %s", b$url))
+  if (!is.null(b$doi))
+    out <- c(out, sprintf("DO  - %s", b$doi))
+  if (!is.null(b$note))
+    out <- c(out, sprintf("N1  - %s", b$note))
+  
+  c(out, "ER  - ")
+}
+
+# Main function to export citations
+export_citations_to_ris <- function(pkgs = NULL, file = "citations.ris") {
+  if (is.null(pkgs)) {
+    cits <- citation()
+  } else {
+    cits <- unlist(lapply(pkgs, citation), recursive = FALSE)
+  }
+  
+  ris_lines <- unlist(lapply(cits, bibentry_to_ris))
+  writeLines(ris_lines, con = file)
+  message(sprintf("Written %d entries to '%s'", length(cits), file))
+}
+

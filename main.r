@@ -1,17 +1,18 @@
 # main.R
 
 # --- 0. Setup ---
-source("functions.R")
+source("D:/rstudio/SimBu/functions.r")
 
-# High-level parameters
+# Define high-level parameters
 PACKAGES <- c(
   "SimBu", "limma",   "edgeR", "dplyr",  "ggplot2",
   "patchwork", "SummarizedExperiment", "Matrix",
   "sva",  "RUVSeq", "EDASeq", "vegan",
   "cluster", "tidyr", "knitr", "batchelor",
   "SingleCellExperiment", "gtools", "R.cache",
-  "matrixStats"
+  "matrixStats", "kBET" # <-- needed for rowVars()
 )
+
 NSAMPLES_PER_BATCH <- 30
 N_GENES            <- 1000
 N_CELLS            <- 300
@@ -33,14 +34,16 @@ install_and_load_packages(PACKAGES)
 
 # --- 2. Data Generation and Simulation ---
 set.seed(123)
+
+empirical_gene_means <- rgamma(N_GENES, shape = MEAN_SHAPE, scale = MEAN_SCALE)
+empirical_lib_sizes  <- rlnorm(N_CELLS, meanlog = SIZE_MEANLOG, sdlog = SIZE_SDLOG)
+
 base_ds <- create_base_sc_dataset(
-  n_genes     = N_GENES,
-  n_cells     = N_CELLS,
-  mean_shape  = MEAN_SHAPE,
-  mean_scale  = MEAN_SCALE,
-  size_shape  = SIZE_SHAPE,
-  size_scale  = SIZE_SCALE,
-  dispersion  = DISPERSION
+  n_genes            = N_GENES,
+  n_cells            = N_CELLS,
+  empirical_means    = empirical_gene_means,
+  empirical_libsizes = empirical_lib_sizes,
+  dispersion         = DISPERSION
 )
 
 # Filter to most specific genes
@@ -59,13 +62,14 @@ batch_data       <- introduce_batch_effect(
   n_genes_affected  = N_AFFECTED_GENES,
   effect_multiplier = EFFECT_MULTIPLIER
 )
-counts_eff       <- assay(batch_data$se_with_batch, "bulk_counts")
-batch_info       <- batch_data$batch_info
-affected_genes   <- batch_data$affected_genes
+
+counts_with_effect <- assay(batch_data$se_with_batch, "bulk_counts")
+batch_info         <- batch_data$batch_info
+affected_genes     <- batch_data$affected_genes
 
 # Compute log2-CPM for pre-correction
-df_pre           <- edgeR::cpm(
-  as.matrix(counts_eff),
+log_counts_before  <- edgeR::cpm(
+  as.matrix(counts_with_effect),
   log         = TRUE,
   prior.count = 1
 )
@@ -73,7 +77,7 @@ df_pre           <- edgeR::cpm(
 # --- 4. Initialize Storage for Plots & Metrics ---
 plots_list <- list(
   Pre = perform_pca_and_plot(
-    log_counts = df_pre,
+    log_counts = log_counts_before,
     batch_info = batch_info,
     plot_title = "Pre-Correction"
   )
@@ -81,8 +85,8 @@ plots_list <- list(
 metrics_list <- list(
   Pre = data.frame(
     Method           = "Pre-Correction",
-    R_Squared        = calculate_permanova_r2(df_pre, batch_info),
-    Silhouette_Width = calculate_silhouette_width(df_pre, batch_info)
+    R_Squared        = calculate_permanova_r2(log_counts_before, batch_info),
+    Silhouette_Width = calculate_silhouette_width(log_counts_before, batch_info)
   )
 )
 
@@ -144,63 +148,102 @@ metrics_list$`ComBat-Seq` <- data.frame(
   Silhouette_Width = calculate_silhouette_width(log_seq, batch_info)
 )
 
-## 5.4 RUVr (dense + phenoData + tuning)
-counts_mat <- as.matrix(counts_with_effect)
-pheno_df   <- data.frame(batch = batch_info,
-                         row.names = colnames(counts_mat))
-phenoData  <- Biobase::AnnotatedDataFrame(pheno_df)
+# 5.4 RUVs (pure RUVSeq)
 
-seqset <- EDASeq::newSeqExpressionSet(counts = counts_mat,
-                                      phenoData = phenoData)
-
-logcpm_batch <- edgeR::cpm(counts_mat, log=TRUE, prior.count=1)
-gene_var     <- matrixStats::rowVars(logcpm_batch)
-ctrl_cands   <- names(sort(gene_var))[1:50]
-ctrl_genes   <- setdiff(ctrl_cands, affected_genes)
+# a) Pick control genes (lowest-variance, excluding truly batch-affected)
+# *** THE FIX: Use 'counts_with_effect' instead of the undefined 'counts_eff' ***
+logcpm     <- edgeR::cpm(counts_with_effect, log = TRUE, prior.count = 1)
+gene_var   <- matrixStats::rowVars(logcpm)
+# ... (rest of the logic is fine)
+ctrl_cands <- names(sort(gene_var))[1:50]
+ctrl_genes <- setdiff(ctrl_cands, affected_genes)
 if (length(ctrl_genes) < 10) {
-  warning("Fewer than 10 true controls; RUVr may underperform.")
+  warning("Fewer than 10 control genes; RUVs may underperform.")
 }
 
-dge    <- edgeR::DGEList(counts = counts_mat)
-dge    <- edgeR::calcNormFactors(dge)
-design <- model.matrix(~ batch_info)
-dge    <- edgeR::estimateDisp(dge, design)
-fit    <- edgeR::glmFit(dge, design)
-resid_mat <- residuals(fit, type = "deviance")
-# tune k = 1:3
-ruvr_metrics <- lapply(1:3, function(kval) {
-  seq_ruv  <- RUVSeq::RUVr(x         = seqset,
-                           cIdx      = ctrl_genes,
-                           k         = kval,
-                           residuals = resid_mat)
-  corr_mat <- Biobase::assayDataElement(seq_ruv, "normalizedCounts")
-  log_ruvr <- edgeR::cpm(corr_mat, log=TRUE, prior.count=1)
+# b) Build scIdx
+# ... (this part is correct) ...
+group_ids     <- rep(seq_along(sim_list), each = NSAMPLES_PER_BATCH)
+members       <- split(seq_along(group_ids), group_ids)
+max_size      <- max(lengths(members))
+scIdx         <- t(sapply(members, function(idxs) {
+  c(idxs, rep(-1, max_size - length(idxs)))
+}))
+
+# c) Tune k = 1:3
+ruvs_metrics <- lapply(1:3, function(kval) {
+  # *** THE FIX: Use 'counts_with_effect' here as well ***
+  res    <- run_ruvs(counts_with_effect, ctrl_genes, scIdx, k = kval)
+  log_ds <- edgeR::cpm(res$corrected, log=TRUE, prior.count=1)
   data.frame(
     k          = kval,
-    R2         = calculate_permanova_r2(log_ruvr, batch_info),
-    Silhouette = calculate_silhouette_width(log_ruvr, batch_info)
+    R2         = calculate_permanova_r2(log_ds, batch_info),
+    Silhouette = calculate_silhouette_width(log_ds, batch_info)
   )
 })
-ruvr_metrics_df <- do.call(rbind, ruvr_metrics)
+ruvs_metrics_df <- do.call(rbind, ruvs_metrics)
 print(knitr::kable(
-  ruvr_metrics_df,
-  caption = "RUVr Tuning: k vs Batch R² & Silhouette"
+  ruvs_metrics_df,
+  caption = "RUVs Tuning: k vs Batch R² & Silhouette"
 ))
-best_k   <- ruvr_metrics_df$k[which.min(ruvr_metrics_df$R2)]
-seq_best <- RUVSeq::RUVr(x         = seqset,
-                         cIdx      = ctrl_genes,
-                         k         = best_k,
-                         residuals = resid_mat)
-corr_best <- Biobase::assayDataElement(seq_best, "normalizedCounts")
-log_best  <- edgeR::cpm(corr_best, log=TRUE, prior.count=1)
 
-plots_list$RUVr <- perform_pca_and_plot(
-  log_best, batch_info, paste0("RUVr (k=", best_k, ")")
+# d) Best k & final correction
+best_k   <- ruvs_metrics_df$k[which.min(ruvs_metrics_df$R2)]
+# *** THE FIX: And use 'counts_with_effect' one last time here ***
+best_res <- run_ruvs(counts_with_effect, ctrl_genes, scIdx, k = best_k)
+log_best <- edgeR::cpm(best_res$corrected, log = TRUE, prior.count = 1)
+
+ruvs_method_name <- paste0("RUVs (k=", best_k, ")")
+
+plots_list[[ruvs_method_name]] <- perform_pca_and_plot(
+  log_best, batch_info, ruvs_method_name
 )
-metrics_list$RUVr <- data.frame(
-  Method           = paste0("RUVr (k=", best_k, ")"),
+metrics_list[[ruvs_method_name]] <- data.frame(
+  Method           = ruvs_method_name,
   R_Squared        = calculate_permanova_r2(log_best, batch_info),
   Silhouette_Width = calculate_silhouette_width(log_best, batch_info)
+)
+
+# --- 5.5 RUVg (upper‐quartile norm + control‐gene RUVSeq) ---  
+# a) Define control genes (same as for RUVs)
+ctrl_cands <- names(sort(matrixStats::rowVars(
+  edgeR::cpm(counts_with_effect, log=TRUE, prior.count=1)
+)))[1:50]
+ctrl_genes <- setdiff(ctrl_cands, affected_genes)
+if (length(ctrl_genes) < 10) {
+  warning("Fewer than 10 control genes; RUVg may underperform.")
+}
+
+# b) Tune k = 1:3
+ruvg_metrics <- lapply(1:3, function(kval) {
+  # run_ruvg(raw_counts, control_genes, k)
+  corrected <- run_ruvg(counts_with_effect, ctrl_genes, k = kval)
+  log_ds    <- edgeR::cpm(corrected, log = TRUE, prior.count = 1)
+  data.frame(
+    k          = kval,
+    R2         = calculate_permanova_r2(log_ds, batch_info),
+    Silhouette = calculate_silhouette_width(log_ds, batch_info)
+  )
+})
+ruvg_metrics_df <- do.call(rbind, ruvg_metrics)
+print(knitr::kable(
+  ruvg_metrics_df,
+  caption = "RUVg Tuning: k vs Batch R² & Silhouette"
+))
+
+# c) Best k & final correction
+best_k_rg <- ruvg_metrics_df$k[which.min(ruvg_metrics_df$R2)]
+corr_rg   <- run_ruvg(counts_with_effect, ctrl_genes, k = best_k_rg)
+log_rg    <- edgeR::cpm(corr_rg, log = TRUE, prior.count = 1)
+
+# d) Store in lists under "RUVg"
+plots_list$RUVg <- perform_pca_and_plot(
+  log_rg, batch_info, paste0("RUVg (k=", best_k_rg, ")")
+)
+metrics_list$RUVg <- data.frame(
+  Method           = paste0("RUVg (k=", best_k_rg, ")"),
+  R_Squared        = calculate_permanova_r2(log_rg, batch_info),
+  Silhouette_Width = calculate_silhouette_width(log_rg, batch_info)
 )
 
 ## 5.5 fastMNN
@@ -215,43 +258,61 @@ metrics_list$fastMNN <- data.frame(
 )
 
 ## 5.6 PCA-Correction
+# *** THE FIX: Define the method name ONCE here as well. ***
+pca_method_name <- "PCA Correction"
 log_pca <- run_pca_correction(log_counts_before, batch_info, sig_threshold = 1e-4)
-plots_list$PCA <- perform_pca_and_plot(log_pca, batch_info, "PCA Correction")
-metrics_list$PCA <- data.frame(
-  Method           = "PCA Correction",
+plots_list[[pca_method_name]] <- perform_pca_and_plot(log_pca, batch_info, pca_method_name)
+metrics_list[[pca_method_name]] <- data.frame(
+  Method           = pca_method_name,
   R_Squared        = calculate_permanova_r2(log_pca, batch_info),
   Silhouette_Width = calculate_silhouette_width(log_pca, batch_info)
 )
 
-# --- 6. Compare All Methods: add kBET (k₀ = 10) ---
+# --- 6. Compare All Methods: add kBET ---
 method_outputs <- list(
+  # The names for these methods are static and already correct
   Pre          = list(type="log", mat=log_counts_before),
   Limma        = list(type="log", mat=log_limma),
   ComBat       = list(type="log", mat=log_combat),
   `ComBat-Seq` = list(type="log", mat=log_seq),
-  RUVr         = list(type="log", mat=log_best),
+  
+  # Add the data for the dynamically-named methods
+  list(type="log", mat=log_best), # This will be named for RUVs
+  
   fastMNN      = list(type="pca", mat=pcs_mnn),
-  PCA          = list(type="log", mat=log_pca)
+  
+  list(type="log", mat=log_pca) # This will be named for PCA
 )
 
+# Now, set all the names correctly in one go.
+# This ensures the dynamic names from section 5 are used.
+names(method_outputs) <- c(
+  "Pre", "Limma", "ComBat", "ComBat-Seq",
+  ruvs_method_name, # The name created in section 5.4, e.g., "RUVs (k=1)"
+  "fastMNN",
+  pca_method_name   # The name created in section 5.6, "PCA Correction"
+)
+
+
+# This loop will now execute correctly because the keys will match perfectly.
 rows <- lapply(names(method_outputs), function(key) {
   out  <- method_outputs[[key]]
   base <- metrics_list[[key]]
   
-  if (out$type == "log") {
-    pr  <- prcomp(t(out$mat), scale.=TRUE)
-    pcs <- pr$x[, 1:min(10, ncol(pr$x))]
-  } else {
-    pcs <- out$mat[, 1:min(10, ncol(out$mat))]
+  if (is.null(base) || nrow(base) == 0) {
+    warning(paste("Metrics not found for method:", key, ". This should not happen. Skipping."))
+    return(NULL)
   }
   
-  kbet_val <- tryCatch({
-    res <- kbet::kbet(df    = pcs,
-                      batch = batch_info,
-                      k0    = 10,
-                      plot  = FALSE)
-    res$summary$kbet.observed
-  }, error = function(e) NA)
+  is_pca_data <- out$type == "pca"
+  log_counts_data <- if (!is_pca_data) out$mat else NULL
+  pca_data_input  <- if (is_pca_data) out$mat else NULL
+  
+  kbet_val <- run_kbet(
+    log_counts = log_counts_data,
+    pca_data   = pca_data_input,
+    batch_info = batch_info
+  )
   
   data.frame(
     Method           = base$Method,
@@ -262,11 +323,20 @@ rows <- lapply(names(method_outputs), function(key) {
   )
 })
 
-all_metrics <- do.call(rbind, rows)
+# Remove any NULL elements that resulted from skipped methods
+all_metrics <- do.call(rbind, Filter(Negate(is.null), rows))
+
+
+# Add a check for any rows that might have failed
+if(any(is.na(all_metrics$kBET_Rejection))) {
+  warning("kBET returned NA for one or more methods. Check warnings for details.")
+}
+
+# Print the final table
 print(knitr::kable(
   all_metrics,
   digits  = 3,
-  caption = "All Methods: PERMANOVA R², Silhouette Width, and kBET (k₀=10)"
+  caption = "All Methods: PERMANOVA R², Silhouette Width, and kBET Rejection Rate"
 ))
 
 # --- 7. Final Plots ---
@@ -278,7 +348,7 @@ logcpm_list <- list(
   "Limma"          = log_limma,
   "ComBat"         = log_combat,
   "ComBat-Seq"     = log_seq,
-  "RUVr"           = log_best,
+  "RUVs"           = log_best,
   "PCA Correction" = log_pca
 )
 sample_info <- data.frame(Sample_ID = colnames(log_counts_before),
@@ -312,7 +382,7 @@ metrics_melted$Method <- factor(
   metrics_melted$Method,
   levels = c(
     "Pre-Correction","Limma","ComBat",
-    "ComBat-Seq",paste0("RUVr (k=",best_k,")"),
+    "ComBat-Seq",paste0("RUVs (k=",best_k,")"),
     "fastMNN","PCA Correction"
   )
 )
