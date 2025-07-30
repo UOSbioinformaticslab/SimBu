@@ -1,7 +1,9 @@
+################################################################################
+##                     HELPER AND METHOD FUNCTIONS                            ##
+################################################################################
+
+
 #' Install and Load Required R Packages
-#'
-#' Handles installation from CRAN, Bioconductor, and GitHub.
-#' @param packages_to_install A character vector of package names.
 install_and_load_packages <- function(packages_to_install) {
   if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
   if (!require("remotes", quietly = TRUE)) install.packages("remotes")
@@ -12,7 +14,7 @@ install_and_load_packages <- function(packages_to_install) {
     
     if (!require(pkg_name, character.only = TRUE, quietly = TRUE)) {
       if (is_github) {
-        remotes::install_github(pkg, force = TRUE) # Force install to get latest
+        remotes::install_github(pkg, force = TRUE)
       } else {
         BiocManager::install(pkg, update = FALSE)
       }
@@ -44,7 +46,6 @@ create_base_sc_dataset <- function(n_genes=1000, n_cells=300, empirical_means,
   kept <- matrix(rbinom(n_genes * n_cells, 1, 1 - p_drop), nrow = n_genes)
   counts <- raw_counts * kept
   
-  # Add ambient RNA contamination
   ambient_prof <- gene_means / sum(gene_means)
   lib_sizes <- colSums(counts)
   valid_libs <- lib_sizes > 0
@@ -105,8 +106,8 @@ generate_simulations <- function(simbu_dataset, n_sims=3, n_samples_per_sim=30, 
   })
 }
 
-#' Create a Non-Confounded Dataset with Batch Effect
-create_confound_free_dataset <- function(sim_list, n_genes_affected, effect_multiplier) {
+#' Create a Non-Confounded Dataset with Batch and DE Effects
+create_confound_free_dataset <- function(sim_list, n_genes_affected, effect_multiplier, n_de_genes, de_fold_change) {
   for (i in seq_along(sim_list)) {
     colData(sim_list[[i]]$bulk)$biological_group <- paste0("Sim", i)
   }
@@ -116,24 +117,34 @@ create_confound_free_dataset <- function(sim_list, n_genes_affected, effect_mult
   n_batches <- length(sim_list)
   samples_per_batch <- n_samples / n_batches
   set.seed(456)
-  batch_info <- sample(rep(paste0("Batch", 1:n_batches), each = samples_per_batch))
+  batch_labels_ordered <- rep(paste0("Batch", 1:n_batches), each = samples_per_batch)
+  batch_info <- sample(batch_labels_ordered)
   colData(merged_se)$batch <- batch_info
   biological_vars <- merged_se$biological_group
   counts_matrix <- assay(merged_se, "bulk_counts")
+  
   set.seed(789)
   affected_genes <- sample(rownames(counts_matrix), n_genes_affected)
   b2_indices <- which(batch_info == "Batch2")
   b3_indices <- which(batch_info == "Batch3")
   counts_matrix[affected_genes, b2_indices] <- round(counts_matrix[affected_genes, b2_indices] * effect_multiplier)
   counts_matrix[affected_genes, b3_indices] <- round(counts_matrix[affected_genes, b3_indices] / effect_multiplier)
+  
+  potential_de_genes <- setdiff(rownames(counts_matrix), affected_genes)
+  if (length(potential_de_genes) < n_de_genes) stop("Not enough potential DE genes after selecting batch-affected genes.")
+  true_de_genes <- sample(potential_de_genes, n_de_genes)
+  sim2_indices <- which(biological_vars == "Sim2")
+  counts_matrix[true_de_genes, sim2_indices] <- round(counts_matrix[true_de_genes, sim2_indices] * de_fold_change)
+  
   assay(merged_se, "bulk_counts") <- counts_matrix
-  list(se_with_batch=merged_se, batch_info=batch_info, biological_vars=biological_vars, affected_genes=affected_genes)
+  list(se_with_batch=merged_se, batch_info=batch_info, biological_vars=biological_vars, 
+       affected_genes=affected_genes, true_de_genes=true_de_genes)
 }
 
 # --- METRIC AND CORRECTION FUNCTIONS ---
 
-#' Perform PCA and plot
-perform_pca_and_plot <- function(log_counts=NULL, batch_info, plot_title, pca_data=NULL) {
+#' Perform PCA and plot with color for batch and shape for biology
+perform_pca_and_plot <- function(log_counts=NULL, batch_info, biological_vars, plot_title, pca_data=NULL) {
   if (is.null(pca_data)) {
     gene_vars <- matrixStats::rowVars(as.matrix(log_counts))
     log_counts_filtered <- log_counts[gene_vars > 1e-8, ]
@@ -143,14 +154,47 @@ perform_pca_and_plot <- function(log_counts=NULL, batch_info, plot_title, pca_da
     pca_res <- stats::prcomp(t(log_counts_filtered), scale. = TRUE)
     pca_data <- pca_res$x
   }
-  plot_df <- data.frame(PC1=pca_data[,1], PC2=pca_data[,2], batch=batch_info)
-  ggplot2::ggplot(plot_df, ggplot2::aes(x=PC1, y=PC2, color=batch)) +
-    ggplot2::geom_point(size=2, alpha=0.8) + ggplot2::labs(title=plot_title) +
-    ggplot2::theme_bw() + ggplot2::scale_color_brewer(palette="Set1")
+  
+  # Ensure the data passed to ggplot has all necessary columns
+  if (is.null(biological_vars)) {
+    biological_vars <- rep("N/A", length(batch_info))
+  }
+  
+  plot_df <- data.frame(PC1=pca_data[,1], PC2=pca_data[,2], 
+                        batch=batch_info, biology=as.factor(biological_vars))
+  
+  ggplot2::ggplot(plot_df, ggplot2::aes(x=PC1, y=PC2, color=batch, shape=biology)) +
+    ggplot2::geom_point(size=2.5, alpha=0.8) + 
+    ggplot2::labs(title=plot_title) +
+    ggplot2::theme_bw() + 
+    ggplot2::scale_color_brewer(palette="Set1") +
+    ggplot2::scale_shape_manual(values=1:nlevels(plot_df$biology))
+}
+
+#' Plot Log2CPM Boxplot Grid
+plot_log2cpm_boxplot_grid <- function(all_method_data, batch_info) {
+  full_data_long <- lapply(all_method_data, function(method) {
+    if (method$type != "log") return(NULL)
+    as.data.frame(as.matrix(method$data)) %>%
+      tibble::rownames_to_column("Gene") %>%
+      tidyr::pivot_longer(cols = -Gene, names_to = "SampleID", values_to = "Log2CPM") %>%
+      dplyr::mutate(Method = method$name)
+  }) %>%
+    dplyr::bind_rows() %>%
+    dplyr::left_join(data.frame(SampleID = names(batch_info), Batch = batch_info), by = "SampleID")
+  method_levels <- sapply(all_method_data, function(m) m$name)
+  full_data_long$Method <- factor(full_data_long$Method, levels = unlist(method_levels))
+  
+  ggplot2::ggplot(full_data_long, aes(x = Batch, y = Log2CPM, fill = Batch)) +
+    ggplot2::geom_boxplot(outlier.shape = NA, na.rm = TRUE) +
+    ggplot2::facet_wrap(~Method, scales = "free_y") +
+    ggplot2::labs(title = "Distribution of Log2-CPM Values by Batch and Method", x = "Batch", y = "Log2-CPM") +
+    ggplot2::theme_bw() + ggplot2::scale_fill_brewer(palette = "Set1") +
+    ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
 }
 
 #' Run ComBat
-run_combat <- function(log_counts, batch_info, mod, ref_batch=NULL) {
+run_combat <- function(log_counts, batch_info, mod, ref_batch = NULL) {
   sva::ComBat(dat=as.matrix(log_counts), batch=as.factor(batch_info), mod=mod, ref.batch=ref_batch)
 }
 
@@ -162,16 +206,40 @@ run_combat_seq <- function(raw_counts, batch_info, biological_vars=NULL) {
 #' Run RUVs
 run_ruvs <- function(seqset_uq, control_genes, scIdx, k=1) {
   valid_ctrl <- intersect(control_genes, rownames(seqset_uq))
+  if (length(valid_ctrl) < 2) stop("Not enough valid control genes for RUVs.")
   out <- RUVSeq::RUVs(x=seqset_uq, cIdx=valid_ctrl, k=k, scIdx=scIdx)
-  list(corrected=Biobase::assayDataElement(out, "normalizedCounts"))
+  Biobase::assayDataElement(out, "normalizedCounts")
 }
 
 #' Run RUVg
 run_ruvg <- function(seqset_uq, control_genes, k=1) {
   valid_ctrl <- intersect(control_genes, rownames(seqset_uq))
+  if (length(valid_ctrl) < 2) stop("Not enough valid control genes for RUVg.")
   out <- RUVSeq::RUVg(x=seqset_uq, cIdx=valid_ctrl, k=k)
   Biobase::assayDataElement(out, "normalizedCounts")
 }
+
+#' Tune and Run RUV Method
+tune_and_run_ruv <- function(ruv_func, seqset, ctrl_genes, scIdx, k_range, batch_info) {
+  metrics_list <- lapply(k_range, function(k) {
+    result <- try({
+      res <- if (is.null(scIdx)) ruv_func(seqset, ctrl_genes, k = k) else ruv_func(seqset, ctrl_genes, scIdx, k = k)
+      log_ds <- edgeR::cpm(res, log=TRUE, prior.count=1)
+      if (!is.matrix(log_ds) || any(!is.finite(log_ds))) { stop("RUV produced invalid matrix") }
+      data.frame(k=k, R2=calculate_permanova_r2(log_ds, batch_info))
+    }, silent = TRUE)
+    if (inherits(result, "try-error")) return(NULL)
+    return(result)
+  })
+  metrics_df <- do.call(rbind, metrics_list)
+  if (is.null(metrics_df) || nrow(metrics_df) == 0) stop("RUV correction failed for all values of k.")
+  best_k <- metrics_df$k[which.min(metrics_df$R2)]
+  
+  final_counts <- if (is.null(scIdx)) ruv_func(seqset, ctrl_genes, k = best_k) else ruv_func(seqset, ctrl_genes, scIdx, k = best_k)
+  log_counts <- edgeR::cpm(final_counts, log=TRUE, prior.count=1)
+  return(list(data=log_counts, k=best_k))
+}
+
 
 #' Run fastMNN
 run_fastmnn <- function(log_counts, batch_info) {
@@ -208,6 +276,17 @@ run_svaseq <- function(raw_counts, mod, mod0) {
     return(edgeR::cpm(raw_counts, log = TRUE, prior.count = 1))
   }
 }
+
+#' Get Empirical Control Genes for RUV
+get_empirical_controls <- function(log_counts, batch_info, n_controls=50) {
+  design <- model.matrix(~ as.factor(batch_info))
+  fit <- limma::lmFit(log_counts, design)
+  fit <- limma::eBayes(fit)
+  top_genes <- limma::topTable(fit, coef=2:nlevels(as.factor(batch_info)), number=Inf, sort.by="none")
+  empirical_controls <- rownames(top_genes[order(top_genes$P.Value),][(nrow(top_genes)-n_controls+1):nrow(top_genes),])
+  return(empirical_controls)
+}
+
 
 # --- METRIC CALCULATION FUNCTIONS ---
 
@@ -302,4 +381,31 @@ run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 15, pca_data = NULL)
   
   if (is.null(kbet_results)) return(NA)
   return(kbet_results$summary$kBET.observed)
+}
+
+#' Run DE analysis and calculate TPR/FPR
+run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
+  bio_subset <- biological_vars %in% c("Sim1", "Sim2")
+  log_data_subset <- log_data[, bio_subset]
+  bio_vars_subset <- factor(biological_vars[bio_subset])
+  
+  if (nlevels(bio_vars_subset) < 2) return(list(TPR=NA, FPR=NA))
+  
+  design <- model.matrix(~ bio_vars_subset)
+  fit <- limma::lmFit(log_data_subset, design)
+  fit <- limma::eBayes(fit)
+  de_results <- limma::topTable(fit, coef=ncol(design), number=Inf, sort.by="none")
+  
+  significant_genes <- rownames(de_results[de_results$adj.P.Val < 0.05, ])
+  
+  true_positives <- sum(significant_genes %in% true_de_genes)
+  false_positives <- sum(!significant_genes %in% true_de_genes)
+  
+  total_positives <- length(true_de_genes)
+  total_negatives <- nrow(log_data) - total_positives
+  
+  tpr <- if (total_positives > 0) true_positives / total_positives else 0
+  fpr <- if (total_negatives > 0) false_positives / total_negatives else 0
+  
+  return(list(TPR = tpr, FPR = fpr))
 }
