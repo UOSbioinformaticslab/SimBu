@@ -167,7 +167,7 @@ perform_pca_and_plot <- function(log_counts=NULL, batch_info, biological_vars, p
   plot_df <- data.frame(PC1=pca_data[,1], PC2=pca_data[,2], batch=batch_info, biology=as.factor(biological_vars))
   
   ggplot2::ggplot(plot_df, ggplot2::aes(x=PC1, y=PC2, color=batch, shape=biology)) +
-    ggplot2::geom_point(size=2.5, alpha=0.8) + 
+    ggplot2::geom_point(size=2, alpha=0.8) + 
     ggplot2::labs(title=plot_title) +
     ggplot2::theme_bw() + 
     ggplot2::scale_color_brewer(palette="Set1") +
