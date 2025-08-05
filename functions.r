@@ -106,35 +106,42 @@ generate_simulations <- function(simbu_dataset, n_sims=3, n_samples_per_sim=30, 
   })
 }
 
-#' Create a Non-Confounded Dataset with Batch and DE Effects
-create_confound_free_dataset <- function(sim_list, n_genes_affected, effect_multiplier, n_de_genes, de_fold_change) {
+#' Create a Case-Control Dataset with Batch and DE Effects
+create_case_control_dataset <- function(sim_list, n_genes_affected, effect_multiplier, n_de_genes, de_fold_change) {
+  group_names <- c("Control", "Tumor")
+  if(length(sim_list) != 2) stop("This function requires exactly two simulations for Control and Tumor groups.")
+  
   for (i in seq_along(sim_list)) {
-    colData(sim_list[[i]]$bulk)$biological_group <- paste0("Sim", i)
+    colData(sim_list[[i]]$bulk)$biological_group <- group_names[i]
   }
+  
   merged_se <- SimBu::merge_simulations(sim_list)$bulk
   colnames(merged_se) <- make.names(colnames(merged_se), unique = TRUE)
+  
   n_samples <- ncol(merged_se)
   n_batches <- length(sim_list)
   samples_per_batch <- n_samples / n_batches
+  
   set.seed(456)
   batch_labels_ordered <- rep(paste0("Batch", 1:n_batches), each = samples_per_batch)
   batch_info <- sample(batch_labels_ordered)
   colData(merged_se)$batch <- batch_info
+  
   biological_vars <- merged_se$biological_group
   counts_matrix <- assay(merged_se, "bulk_counts")
   
+  # Add batch effect to Batch2
   set.seed(789)
   affected_genes <- sample(rownames(counts_matrix), n_genes_affected)
   b2_indices <- which(batch_info == "Batch2")
-  b3_indices <- which(batch_info == "Batch3")
   counts_matrix[affected_genes, b2_indices] <- round(counts_matrix[affected_genes, b2_indices] * effect_multiplier)
-  counts_matrix[affected_genes, b3_indices] <- round(counts_matrix[affected_genes, b3_indices] / effect_multiplier)
   
+  # Add DE genes to Tumor group
   potential_de_genes <- setdiff(rownames(counts_matrix), affected_genes)
   if (length(potential_de_genes) < n_de_genes) stop("Not enough potential DE genes after selecting batch-affected genes.")
   true_de_genes <- sample(potential_de_genes, n_de_genes)
-  sim2_indices <- which(biological_vars == "Sim2")
-  counts_matrix[true_de_genes, sim2_indices] <- round(counts_matrix[true_de_genes, sim2_indices] * de_fold_change)
+  tumor_indices <- which(biological_vars == "Tumor")
+  counts_matrix[true_de_genes, tumor_indices] <- round(counts_matrix[true_de_genes, tumor_indices] * de_fold_change)
   
   assay(merged_se, "bulk_counts") <- counts_matrix
   list(se_with_batch=merged_se, batch_info=batch_info, biological_vars=biological_vars, 
@@ -155,20 +162,16 @@ perform_pca_and_plot <- function(log_counts=NULL, batch_info, biological_vars, p
     pca_data <- pca_res$x
   }
   
-  # Ensure the data passed to ggplot has all necessary columns
-  if (is.null(biological_vars)) {
-    biological_vars <- rep("N/A", length(batch_info))
-  }
+  if (is.null(biological_vars)) { biological_vars <- rep("N/A", length(batch_info)) }
   
-  plot_df <- data.frame(PC1=pca_data[,1], PC2=pca_data[,2], 
-                        batch=batch_info, biology=as.factor(biological_vars))
+  plot_df <- data.frame(PC1=pca_data[,1], PC2=pca_data[,2], batch=batch_info, biology=as.factor(biological_vars))
   
   ggplot2::ggplot(plot_df, ggplot2::aes(x=PC1, y=PC2, color=batch, shape=biology)) +
-    ggplot2::geom_point(size=2.5, alpha=0.8) + 
+    ggplot2::geom_point(size=2, alpha=0.8) + 
     ggplot2::labs(title=plot_title) +
     ggplot2::theme_bw() + 
     ggplot2::scale_color_brewer(palette="Set1") +
-    ggplot2::scale_shape_manual(values=1:nlevels(plot_df$biology))
+    ggplot2::scale_shape_manual(values=c(16, 17)) # Circle for Control, Triangle for Tumor
 }
 
 #' Plot Log2CPM Boxplot Grid
@@ -384,10 +387,10 @@ run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 15, pca_data = NULL)
 }
 
 #' Run DE analysis and calculate TPR/FPR
-run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
-  bio_subset <- biological_vars %in% c("Sim1", "Sim2")
+run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes, groups) {
+  bio_subset <- biological_vars %in% groups
   log_data_subset <- log_data[, bio_subset]
-  bio_vars_subset <- factor(biological_vars[bio_subset])
+  bio_vars_subset <- factor(biological_vars[bio_subset], levels = groups)
   
   if (nlevels(bio_vars_subset) < 2) return(list(TPR=NA, FPR=NA))
   

@@ -13,12 +13,13 @@ PACKAGES <- c(
 NSAMPLES_PER_BATCH <- 50
 N_GENES            <- 1000
 N_CELLS            <- 300
+TOP_GENES          <- 200
+# --- NEW: Simplified to a 2-group comparison ---
+NUM_SIMS           <- 2 
 # --- Adjusting gene counts to be valid ---
-TOP_GENES         <- 200
-N_AFFECTED_GENES  <- 100 
-N_DE_GENES        <- 40 
+N_AFFECTED_GENES  <- 80 
+N_DE_GENES        <- 50 
 # --- Parameter Adjustments for Realistic Batch Effects ---
-NUM_SIMS           <- 4
 MEAN_SHAPE   <- 1.5
 MEAN_SCALE   <- 0.5
 SIZE_MEANLOG <- 0
@@ -40,7 +41,7 @@ data_params_key <- list(
   NSAMPLES_PER_BATCH=NSAMPLES_PER_BATCH, EFFECT_MULTIPLIER=EFFECT_MULTIPLIER,
   N_AFFECTED_GENES=N_AFFECTED_GENES, DISPERSION=DISPERSION, 
   N_DE_GENES=N_DE_GENES, DE_FOLD_CHANGE=DE_FOLD_CHANGE,
-  script_version="v8_pca_shapes"
+  script_version="v9_two_group_comparison"
 )
 prepared_data <- R.cache::loadCache(key = data_params_key)
 
@@ -56,7 +57,7 @@ if (is.null(prepared_data)) {
   sim_list <- generate_simulations(
     simbu_dataset=filtered_ds, n_sims=NUM_SIMS, n_samples_per_sim=NSAMPLES_PER_BATCH
   )
-  prepared_data <- create_confound_free_dataset(
+  prepared_data <- create_case_control_dataset(
     sim_list, n_genes_affected=N_AFFECTED_GENES, effect_multiplier=EFFECT_MULTIPLIER,
     n_de_genes = N_DE_GENES, de_fold_change = DE_FOLD_CHANGE
   )
@@ -68,7 +69,7 @@ if (is.null(prepared_data)) {
 # <<< CACHING END for Data Generation >>>
 
 
-# --- 3. Prepare Non-Confounded Dataset ---
+# --- 3. Prepare Dataset ---
 counts_with_effect <- assay(prepared_data$se_with_batch, "bulk_counts")
 batch_info         <- prepared_data$batch_info
 names(batch_info)  <- colnames(counts_with_effect)
@@ -101,7 +102,6 @@ if (length(true_unaffected_genes) < 50) stop("Not enough unaffected genes for id
 set.seed(456)
 ideal_ctrl_genes <- sample(true_unaffected_genes, 50)
 empirical_ctrl_genes <- get_empirical_controls(log_counts_before, batch_info, n_controls = 50)
-cat("Using", length(empirical_ctrl_genes), "empirical control genes for RUV.\n")
 
 members    <- split(seq_along(biological_vars), biological_vars)
 max_size   <- max(lengths(members))
@@ -112,27 +112,18 @@ seqset_uq_ruvg <- EDASeq::betweenLaneNormalization(EDASeq::newSeqExpressionSet(r
 k_range_ruv <- 1:5
 
 cat("Tuning RUVs (Ideal Controls)...\n")
-ruvs_ideal_log <- tune_and_run_ruv(ruv_func = run_ruvs, seqset = seqset_uq, 
-                                   ctrl_genes = ideal_ctrl_genes, scIdx = scIdx, k_range = k_range_ruv, 
-                                   batch_info = batch_info)
+ruvs_ideal_log <- tune_and_run_ruv(ruv_func = run_ruvs, seqset = seqset_uq, ctrl_genes = ideal_ctrl_genes, scIdx = scIdx, k_range = k_range_ruv, batch_info = batch_info)
 cat("Tuning RUVg (Ideal Controls)...\n")
-ruvg_ideal_log <- tune_and_run_ruv(ruv_func = run_ruvg, seqset = seqset_uq_ruvg, 
-                                   ctrl_genes = ideal_ctrl_genes, scIdx = NULL, k_range = k_range_ruv, 
-                                   batch_info = batch_info)
+ruvg_ideal_log <- tune_and_run_ruv(ruv_func = run_ruvg, seqset = seqset_uq_ruvg, ctrl_genes = ideal_ctrl_genes, scIdx = NULL, k_range = k_range_ruv, batch_info = batch_info)
 cat("Tuning RUVs (Empirical Controls)...\n")
-ruvs_empirical_log <- tune_and_run_ruv(ruv_func = run_ruvs, seqset = seqset_uq, 
-                                       ctrl_genes = empirical_ctrl_genes, scIdx = scIdx, k_range = k_range_ruv, 
-                                       batch_info = batch_info)
+ruvs_empirical_log <- tune_and_run_ruv(ruv_func = run_ruvs, seqset = seqset_uq, ctrl_genes = empirical_ctrl_genes, scIdx = scIdx, k_range = k_range_ruv, batch_info = batch_info)
 cat("Tuning RUVg (Empirical Controls)...\n")
-ruvg_empirical_log <- tune_and_run_ruv(ruv_func = run_ruvg, seqset = seqset_uq_ruvg, 
-                                       ctrl_genes = empirical_ctrl_genes, scIdx = NULL, k_range = k_range_ruv, 
-                                       batch_info = batch_info)
+ruvg_empirical_log <- tune_and_run_ruv(ruv_func = run_ruvg, seqset = seqset_uq_ruvg, ctrl_genes = empirical_ctrl_genes, scIdx = NULL, k_range = k_range_ruv, batch_info = batch_info)
 
 pcs_mnn <- run_fastmnn(log_counts = log_counts_before, batch_info = batch_info)
 log_pca <- run_pca_correction(log_counts_before, batch_info, sig_threshold = 1e-4)
 log_sva <- run_sva(log_counts_before, mod=mod_bio, mod0=mod_null)
 log_svaseq <- run_svaseq(counts_with_effect, mod=mod_bio, mod0=mod_null)
-
 cat("--- All correction methods complete. ---\n\n")
 
 
@@ -154,7 +145,7 @@ all_method_data <- list(
 )
 
 # <<< CACHING START for Metrics Calculation >>>
-metrics_key <- list(data_key = data_params_key, corrected_data = all_method_data, metrics_version = "v2_de_metrics")
+metrics_key <- list(data_key = data_params_key, corrected_data = all_method_data, metrics_version = "v3_two_group")
 all_metrics <- R.cache::loadCache(key = metrics_key)
 
 if(is.null(all_metrics)) {
@@ -180,7 +171,7 @@ if(is.null(all_metrics)) {
     }
     
     de_metrics <- if (!is_pca_method) {
-      run_de_and_evaluate(method$data, biological_vars, true_de_genes)
+      run_de_and_evaluate(method$data, biological_vars, true_de_genes, groups = c("Control", "Tumor"))
     } else {
       list(TPR = NA, FPR = NA)
     }
@@ -211,50 +202,28 @@ if(is.null(all_metrics)) {
 print(knitr::kable(all_metrics, digits = 3, caption = "Comprehensive Batch Correction Method Comparison"))
 
 # --- 7. Final Plots ---
-
 # 7.1 PCA Grid
 pca_plots_list <- lapply(all_method_data, function(method) {
-  # Pass biological_vars to the plotting function
   if (method$type == "log") {
-    perform_pca_and_plot(log_counts = method$data, batch_info = batch_info, 
-                         biological_vars = biological_vars, plot_title = method$name)
+    perform_pca_and_plot(log_counts = method$data, batch_info = batch_info, biological_vars = biological_vars, plot_title = method$name)
   } else {
-    perform_pca_and_plot(pca_data = method$data, batch_info = batch_info, 
-                         biological_vars = biological_vars, plot_title = method$name)
+    perform_pca_and_plot(pca_data = method$data, batch_info = batch_info, biological_vars = biological_vars, plot_title = method$name)
   }
 })
 while(length(pca_plots_list) < 15) pca_plots_list <- c(pca_plots_list, list(patchwork::plot_spacer()))
 plot_panel_pca <- patchwork::wrap_plots(pca_plots_list, ncol = 5)
 print(plot_panel_pca + plot_layout(guides='collect') & theme(aspect.ratio=1, legend.position="bottom"))
 
-
 # 7.2 Log2CPM Boxplot Grid
 boxplot_grid_plot <- plot_log2cpm_boxplot_grid(all_method_data, batch_info)
 print(boxplot_grid_plot)
-
 
 # 7.3 Metrics Barplot
 metrics_melted <- tidyr::pivot_longer(all_metrics, cols = -Method, names_to = "Metric", values_to = "Value")
 ordered_levels <- all_metrics$Method[!duplicated(all_metrics$Method)]
 metrics_melted$Method <- factor(metrics_melted$Method, levels = ordered_levels)
-metric_subtitles <- c(
-  "PERMANOVA_R2"="Lower is Better", "Batch_Silhouette"="Lower is Better", "Bio_Silhouette"="Higher is Better",
-  "kBET_Rejection"="Lower is Better", "PCR_R2"="Lower is Better",
-  "iLISI"="Higher is Better (Mixing)", "cLISI"="Lower is Better (Purity)", "Gene_R2"="Lower is Better",
-  "TPR"="Higher is Better", "FPR"="Lower is Better"
-)
+metric_subtitles <- c("PERMANOVA_R2"="Lower is Better", "Batch_Silhouette"="Lower is Better", "Bio_Silhouette"="Higher is Better", "kBET_Rejection"="Lower is Better", "PCR_R2"="Lower is Better", "iLISI"="Higher is Better (Mixing)", "cLISI"="Lower is Better (Purity)", "Gene_R2"="Lower is Better", "TPR"="Higher is Better", "FPR"="Lower is Better")
 metrics_melted$Subtitle <- factor(metric_subtitles[metrics_melted$Metric], levels = unique(metric_subtitles))
-
 metrics_melted <- metrics_melted %>% filter(!is.na(Value))
+print(ggplot(metrics_melted, aes(x=Method, y=Value, fill=Method)) + geom_col(show.legend=FALSE) + facet_grid(Subtitle ~ Metric, scales="free_y", switch="y") + labs(title="Batch Correction Performance Metrics", x=NULL, y=NULL) + theme_bw() + theme(axis.text.x = element_text(angle=45, hjust=1, size=9), strip.background = element_rect(fill="grey90"), strip.text.y.left = element_text(angle=0), panel.spacing = unit(1, "lines")))
 
-print(ggplot(metrics_melted, aes(x=Method, y=Value, fill=Method)) +
-        geom_col(show.legend=FALSE) +
-        facet_grid(Subtitle ~ Metric, scales="free_y", switch="y") +
-        labs(title="Batch Correction Performance Metrics", x=NULL, y=NULL) +
-        theme_bw() +
-        theme(
-          axis.text.x = element_text(angle=45, hjust=1, size=9),
-          strip.background = element_rect(fill="grey90"),
-          strip.text.y.left = element_text(angle=0), panel.spacing = unit(1, "lines")
-        )
-)
