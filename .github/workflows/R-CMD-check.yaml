@@ -15,10 +15,11 @@ jobs:
       with:
         r-version: '4.5.1'
 
+
     - name: Install dependencies
       run: |
-        install.packages('devtools')
-        devtools::install_deps(dependencies = TRUE)
+        Rscript -e "install.packages('devtools')"
+        R
 
     - name: Run R CMD check
       run: |
