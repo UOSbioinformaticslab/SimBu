@@ -40,7 +40,7 @@ data_params_key <- list(
   NSAMPLES_PER_BATCH=NSAMPLES_PER_BATCH, EFFECT_MULTIPLIER=EFFECT_MULTIPLIER,
   N_AFFECTED_GENES=N_AFFECTED_GENES, DISPERSION=DISPERSION, 
   N_DE_GENES=N_DE_GENES, DE_FOLD_CHANGE=DE_FOLD_CHANGE,
-  script_version="v8_pca_shapes"
+  script_version="v9_tumor_control_batches"
 )
 prepared_data <- R.cache::loadCache(key = data_params_key)
 
@@ -143,10 +143,10 @@ all_method_data <- list(
   list(name = "ComBat",               type = "log", data = log_combat),
   list(name = "ComBat-Ref",           type = "log", data = log_combat_ref),
   list(name = "ComBat-Seq",           type = "log", data = log_seq),
-  list(name = "RUVs (Ideal)",         type = "log", data = ruvs_ideal_log$data),
-  list(name = "RUVg (Ideal)",         type = "log", data = ruvg_ideal_log$data),
-  list(name = "RUVs (Empirical)",     type = "log", data = ruvs_empirical_log$data),
-  list(name = "RUVg (Empirical)",     type = "log", data = ruvg_empirical_log$data),
+  list(name = paste0("RUVs (Ideal, k=", ruvs_ideal_log$k, ")"),         type = "log", data = ruvs_ideal_log$data),
+  list(name = paste0("RUVg (Ideal, k=", ruvg_ideal_log$k, ")"),         type = "log", data = ruvg_ideal_log$data),
+  list(name = paste0("RUVs (Empirical, k=", ruvs_empirical_log$k, ")"), type = "log", data = ruvs_empirical_log$data),
+  list(name = paste0("RUVg (Empirical, k=", ruvg_empirical_log$k, ")"), type = "log", data = ruvg_empirical_log$data),
   list(name = "fastMNN",              type = "pca", data = pcs_mnn),
   list(name = "PCA Correction",       type = "log", data = log_pca),
   list(name = "SVA",                  type = "log", data = log_sva),
@@ -154,7 +154,7 @@ all_method_data <- list(
 )
 
 # <<< CACHING START for Metrics Calculation >>>
-metrics_key <- list(data_key = data_params_key, corrected_data = all_method_data, metrics_version = "v2_de_metrics")
+metrics_key <- list(data_key = data_params_key, corrected_data = all_method_data, metrics_version = "v3_de_metrics")
 all_metrics <- R.cache::loadCache(key = metrics_key)
 
 if(is.null(all_metrics)) {

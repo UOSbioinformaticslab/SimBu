@@ -107,38 +107,49 @@ generate_simulations <- function(simbu_dataset, n_sims=3, n_samples_per_sim=30, 
 }
 
 #' Create a Non-Confounded Dataset with Batch and DE Effects
-create_confound_free_dataset <- function(sim_list, n_genes_affected, effect_multiplier, n_de_genes, de_fold_change) {
+create_confound_free_dataset <- function(sim_list, n_genes_affected, effect_multiplier, n_de_genes, de_fold_change, tumor_fraction = 0.5) {
+  # Assign Tumor / Control labels WITHIN each simulation so biology is present in every batch
   for (i in seq_along(sim_list)) {
-    colData(sim_list[[i]]$bulk)$biological_group <- paste0("Sim", i)
+    se_i <- sim_list[[i]]$bulk
+    ns_i <- ncol(se_i)
+    n_tumor <- round(ns_i * tumor_fraction)
+    tumor_labels <- c(rep("Tumor", n_tumor), rep("Control", ns_i - n_tumor))
+    tumor_labels <- sample(tumor_labels)  # shuffle within batch
+    colData(se_i)$biological_group <- tumor_labels
+    colData(se_i)$batch <- paste0("Batch", i)  # keep batch identity = simulation
+    sim_list[[i]]$bulk <- se_i
   }
+
+  # Merge simulations (batches)
   merged_se <- SimBu::merge_simulations(sim_list)$bulk
   colnames(merged_se) <- make.names(colnames(merged_se), unique = TRUE)
-  n_samples <- ncol(merged_se)
-  n_batches <- length(sim_list)
-  samples_per_batch <- n_samples / n_batches
-  set.seed(456)
-  batch_labels_ordered <- rep(paste0("Batch", 1:n_batches), each = samples_per_batch)
-  batch_info <- sample(batch_labels_ordered)
-  colData(merged_se)$batch <- batch_info
+  batch_info <- merged_se$batch  # already assigned
   biological_vars <- merged_se$biological_group
   counts_matrix <- assay(merged_se, "bulk_counts")
-  
+
+  # Introduce batch-specific effects (affect selected genes differently in some batches)
   set.seed(789)
   affected_genes <- sample(rownames(counts_matrix), n_genes_affected)
   b2_indices <- which(batch_info == "Batch2")
   b3_indices <- which(batch_info == "Batch3")
-  counts_matrix[affected_genes, b2_indices] <- round(counts_matrix[affected_genes, b2_indices] * effect_multiplier)
-  counts_matrix[affected_genes, b3_indices] <- round(counts_matrix[affected_genes, b3_indices] / effect_multiplier)
-  
+  if (length(b2_indices) > 0) counts_matrix[affected_genes, b2_indices] <- round(counts_matrix[affected_genes, b2_indices] * effect_multiplier)
+  if (length(b3_indices) > 0) counts_matrix[affected_genes, b3_indices] <- round(counts_matrix[affected_genes, b3_indices] / effect_multiplier)
+
+  # Select DE genes (distinct biology signal) applied to Tumor samples across ALL batches
   potential_de_genes <- setdiff(rownames(counts_matrix), affected_genes)
   if (length(potential_de_genes) < n_de_genes) stop("Not enough potential DE genes after selecting batch-affected genes.")
   true_de_genes <- sample(potential_de_genes, n_de_genes)
-  sim2_indices <- which(biological_vars == "Sim2")
-  counts_matrix[true_de_genes, sim2_indices] <- round(counts_matrix[true_de_genes, sim2_indices] * de_fold_change)
-  
+  tumor_indices <- which(biological_vars == "Tumor")
+  counts_matrix[true_de_genes, tumor_indices] <- round(counts_matrix[true_de_genes, tumor_indices] * de_fold_change)
+
   assay(merged_se, "bulk_counts") <- counts_matrix
-  list(se_with_batch=merged_se, batch_info=batch_info, biological_vars=biological_vars, 
-       affected_genes=affected_genes, true_de_genes=true_de_genes)
+  list(
+    se_with_batch = merged_se,
+    batch_info = batch_info,
+    biological_vars = biological_vars,
+    affected_genes = affected_genes,
+    true_de_genes = true_de_genes
+  )
 }
 
 # --- METRIC AND CORRECTION FUNCTIONS ---
@@ -160,12 +171,25 @@ perform_pca_and_plot <- function(log_counts=NULL, batch_info, biological_vars, p
     biological_vars <- rep("N/A", length(batch_info))
   }
   
+  # Extract an optional k from the plot title to show as subtitle (for RUV methods)
+  subtitle_text <- NULL
+  clean_title <- plot_title
+  if (grepl("k=", plot_title, fixed = TRUE)) {
+    # Extract numeric k value
+    k_val <- sub(".*k=\\s*([0-9]+).*", "\\1", plot_title)
+    if (nzchar(k_val) && grepl("^[0-9]+$", k_val)) {
+      subtitle_text <- paste0("k=", k_val)
+      # Clean up title like "RUVs (Ideal, k=3)" -> "RUVs (Ideal)"
+      clean_title <- sub(",\\s*k=\\s*[0-9]+\\)", ")", plot_title)
+    }
+  }
+
   plot_df <- data.frame(PC1=pca_data[,1], PC2=pca_data[,2], 
                         batch=batch_info, biology=as.factor(biological_vars))
   
   ggplot2::ggplot(plot_df, ggplot2::aes(x=PC1, y=PC2, color=batch, shape=biology)) +
     ggplot2::geom_point(size=2.5, alpha=0.8) + 
-    ggplot2::labs(title=plot_title) +
+    ggplot2::labs(title=clean_title, subtitle = subtitle_text) +
     ggplot2::theme_bw() + 
     ggplot2::scale_color_brewer(palette="Set1") +
     ggplot2::scale_shape_manual(values=1:nlevels(plot_df$biology))
@@ -385,27 +409,25 @@ run_kbet <- function(log_counts = NULL, batch_info, n_pcs = 15, pca_data = NULL)
 
 #' Run DE analysis and calculate TPR/FPR
 run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
-  bio_subset <- biological_vars %in% c("Sim1", "Sim2")
-  log_data_subset <- log_data[, bio_subset]
-  bio_vars_subset <- factor(biological_vars[bio_subset])
-  
-  if (nlevels(bio_vars_subset) < 2) return(list(TPR=NA, FPR=NA))
-  
-  design <- model.matrix(~ bio_vars_subset)
-  fit <- limma::lmFit(log_data_subset, design)
+  # Assume biological_vars now encodes two groups: Tumor vs Control present in all batches
+  bio_factor <- factor(biological_vars)
+  if (nlevels(bio_factor) != 2) return(list(TPR = NA, FPR = NA))
+
+  design <- model.matrix(~ bio_factor)
+  fit <- limma::lmFit(log_data, design)
   fit <- limma::eBayes(fit)
-  de_results <- limma::topTable(fit, coef=ncol(design), number=Inf, sort.by="none")
-  
+  de_results <- limma::topTable(fit, coef = ncol(design), number = Inf, sort.by = "none")
+
   significant_genes <- rownames(de_results[de_results$adj.P.Val < 0.05, ])
-  
+
   true_positives <- sum(significant_genes %in% true_de_genes)
   false_positives <- sum(!significant_genes %in% true_de_genes)
-  
+
   total_positives <- length(true_de_genes)
   total_negatives <- nrow(log_data) - total_positives
-  
+
   tpr <- if (total_positives > 0) true_positives / total_positives else 0
   fpr <- if (total_negatives > 0) false_positives / total_negatives else 0
-  
-  return(list(TPR = tpr, FPR = fpr))
+
+  list(TPR = tpr, FPR = fpr)
 }
