@@ -431,3 +431,196 @@ run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
 
   list(TPR = tpr, FPR = fpr)
 }
+
+################################################################################
+##                        SIMULATION VALIDATION                                ##
+################################################################################
+
+#' Quick sanity checks on count matrix
+.sim_sanity_checks <- function(counts) {
+  counts_mat <- as.matrix(counts)
+  list(
+    is_numeric = is.numeric(counts_mat),
+    has_na     = anyNA(counts_mat),
+    has_inf    = any(!is.finite(counts_mat)),
+    any_neg    = any(counts_mat < 0),
+    all_int    = all(abs(counts_mat - round(counts_mat)) < 1e-8),
+    n_genes    = nrow(counts_mat),
+    n_samples  = ncol(counts_mat)
+  )
+}
+
+#' Summarize sparsity and library sizes
+.sim_sparsity_and_libraries <- function(counts, batch_info) {
+  nz_per_col <- Matrix::colSums(counts > 0)
+  nz_per_row <- Matrix::rowSums(counts > 0)
+  lib_sizes  <- Matrix::colSums(counts)
+  zeros_col_frac <- 1 - nz_per_col / nrow(counts)
+  zeros_row_frac <- 1 - nz_per_row / ncol(counts)
+  df_cols <- data.frame(sample = names(lib_sizes), batch = batch_info, lib_size = as.numeric(lib_sizes), zero_frac = as.numeric(zeros_col_frac))
+  df_rows <- data.frame(gene = rownames(counts), zero_frac = as.numeric(zeros_row_frac))
+  list(by_sample = df_cols, by_gene = df_rows)
+}
+
+#' Estimate NB-like dispersion (alpha) from mean-variance
+.sim_estimate_dispersion <- function(counts) {
+  m <- rowMeans(as.matrix(counts))
+  v <- matrixStats::rowVars(as.matrix(counts))
+  keep <- which(m > 1 & v >= m)
+  if (length(keep) < 10) return(list(alpha = NA, n_used = length(keep)))
+  X <- cbind(Intercept = 1, mu = m[keep], mu2 = m[keep]^2)
+  y <- v[keep]
+  # Constrain coefficient of mu to ~1 by subtracting mu, then regress residual on mu^2
+  y_res <- pmax(y - m[keep], 0)
+  fit <- stats::lm(y_res ~ 0 + I(m[keep]^2))
+  alpha <- as.numeric(coef(fit)[1])
+  list(alpha = alpha, n_used = length(keep))
+}
+
+#' Verify injected batch effects on affected vs unaffected genes
+.sim_check_batch_effects <- function(counts, batch_info, affected_genes, ref_batch = "Batch1") {
+  logcpm <- edgeR::cpm(as.matrix(counts), log = TRUE, prior.count = 1)
+  batches <- unique(as.character(batch_info))
+  if (!ref_batch %in% batches) ref_batch <- batches[1]
+  comp_batches <- setdiff(batches, ref_batch)
+  is_aff <- intersect(affected_genes, rownames(logcpm))
+  is_unaff <- setdiff(rownames(logcpm), is_aff)
+  res_list <- lapply(comp_batches, function(b) {
+    d_aff   <- rowMeans(logcpm[is_aff,   batch_info == b, drop = FALSE]) - rowMeans(logcpm[is_aff,   batch_info == ref_batch, drop = FALSE])
+    d_unaff <- rowMeans(logcpm[is_unaff, batch_info == b, drop = FALSE]) - rowMeans(logcpm[is_unaff, batch_info == ref_batch, drop = FALSE])
+    data.frame(batch = b,
+               med_log2FC_aff   = stats::median(d_aff,   na.rm = TRUE),
+               med_log2FC_unaff = stats::median(d_unaff, na.rm = TRUE),
+               n_aff = length(is_aff), n_unaff = length(is_unaff))
+  })
+  do.call(rbind, res_list)
+}
+
+#' Verify injected DE effects between Sim2 and others on true DE genes
+.sim_check_de_effects <- function(counts, biological_vars, true_de_genes) {
+  logcpm <- edgeR::cpm(as.matrix(counts), log = TRUE, prior.count = 1)
+  g_de <- intersect(true_de_genes, rownames(logcpm))
+  others <- setdiff(unique(as.character(biological_vars)), "Sim2")
+  if (length(g_de) == 0 || length(others) == 0) {
+    return(list(summary = data.frame(med_log2FC_trueDE = NA, n_trueDE = length(g_de)), de_metrics = list(TPR = NA, FPR = NA)))
+  }
+  grp2 <- rowMeans(logcpm[g_de, biological_vars == "Sim2", drop = FALSE])
+  grpO <- rowMeans(logcpm[g_de, biological_vars %in% others, drop = FALSE])
+  lfc  <- grp2 - grpO
+  de_metrics <- run_de_and_evaluate(logcpm, biological_vars, true_de_genes)
+  list(summary = data.frame(med_log2FC_trueDE = stats::median(lfc, na.rm = TRUE), n_trueDE = length(g_de)),
+       de_metrics = de_metrics,
+       lfc = lfc)
+}
+
+#' Test independence between batch and biology
+.sim_check_independence <- function(batch_info, biological_vars) {
+  tab <- table(batch = as.factor(batch_info), bio = as.factor(biological_vars))
+  if (any(dim(tab) < 2)) return(list(p.value = NA, cramer_v = NA))
+  chis <- suppressWarnings(stats::chisq.test(tab))
+  n <- sum(tab)
+  phi2 <- chis$statistic / n
+  r <- nrow(tab); c <- ncol(tab)
+  cramer_v <- as.numeric(sqrt(phi2 / (min(r - 1, c - 1))))
+  list(p.value = chis$p.value, cramer_v = cramer_v)
+}
+
+#' Build validation plots
+.sim_validation_plots <- function(counts, batch_info, affected_genes, de_check) {
+  # Library size density
+  libs <- data.frame(sample = colnames(counts), batch = batch_info, lib = as.numeric(Matrix::colSums(counts)))
+  p1 <- ggplot2::ggplot(libs, ggplot2::aes(x = lib, fill = batch, color = batch)) +
+    ggplot2::geom_density(alpha = 0.2) + ggplot2::theme_bw() + ggplot2::scale_x_continuous(labels = scales::comma) +
+    ggplot2::labs(title = "Library sizes", x = "Counts per sample", y = "Density")
+
+  # Zero fraction per sample
+  zeros_col <- 1 - Matrix::colSums(counts > 0) / nrow(counts)
+  zdf <- data.frame(sample = colnames(counts), batch = batch_info, zero_frac = as.numeric(zeros_col))
+  p2 <- ggplot2::ggplot(zdf, ggplot2::aes(x = batch, y = zero_frac, fill = batch)) +
+    ggplot2::geom_violin(trim = FALSE) + ggplot2::geom_boxplot(width = 0.1, outlier.shape = NA) +
+    ggplot2::theme_bw() + ggplot2::labs(title = "Sparsity by batch", x = NULL, y = "Zero fraction") +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1), legend.position = "none")
+
+  # Mean-variance with NB curve
+  m <- rowMeans(as.matrix(counts)); v <- matrixStats::rowVars(as.matrix(counts))
+  disp <- .sim_estimate_dispersion(counts)$alpha
+  mvdf <- data.frame(mu = m, var = v)
+  p3 <- ggplot2::ggplot(mvdf, ggplot2::aes(x = mu, y = var)) + ggplot2::geom_point(alpha = 0.3, size = 1) +
+    ggplot2::scale_x_log10() + ggplot2::scale_y_log10() + ggplot2::theme_bw() +
+    ggplot2::labs(title = paste0("Mean-variance (alpha~", round(disp, 3), ")"), x = "Mean", y = "Variance")
+  if (is.finite(disp) && !is.na(disp)) {
+    curve_df <- data.frame(mu = sort(unique(m))); curve_df$var <- curve_df$mu + disp * curve_df$mu^2
+    p3 <- p3 + ggplot2::geom_line(data = curve_df, ggplot2::aes(x = mu, y = var), color = "red")
+  }
+
+  # Batch-affected genes LFC vs ref batch
+  logcpm <- edgeR::cpm(as.matrix(counts), log = TRUE, prior.count = 1)
+  aff <- intersect(affected_genes, rownames(logcpm))
+  ref <- if ("Batch1" %in% batch_info) "Batch1" else unique(as.character(batch_info))[1]
+  other_batches <- setdiff(unique(as.character(batch_info)), ref)
+  blist <- lapply(other_batches, function(b) {
+    d <- rowMeans(logcpm[aff, batch_info == b, drop = FALSE]) - rowMeans(logcpm[aff, batch_info == ref, drop = FALSE])
+    data.frame(batch = b, lfc = d)
+  })
+  bdf <- if (length(blist) > 0) do.call(rbind, blist) else data.frame(batch = character(), lfc = numeric())
+  p4 <- ggplot2::ggplot(bdf, ggplot2::aes(x = batch, y = lfc, fill = batch)) +
+    ggplot2::geom_violin(trim = FALSE) + ggplot2::geom_boxplot(width = 0.1, outlier.shape = NA) +
+    ggplot2::theme_bw() + ggplot2::labs(title = "Affected genes: LFC vs ref batch", x = NULL, y = "log2FC") +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1), legend.position = "none")
+
+  # True DE gene LFC (Sim2 vs Others)
+  p5 <- ggplot2::ggplot(data.frame(lfc = de_check$lfc), ggplot2::aes(x = 1, y = lfc)) +
+    ggplot2::geom_violin(fill = "#56B4E9", alpha = 0.3) + ggplot2::geom_boxplot(width = 0.1, outlier.shape = NA) +
+    ggplot2::theme_bw() + ggplot2::labs(title = "True DE (Sim2 vs Others)", x = NULL, y = "log2FC") +
+    ggplot2::theme(axis.text.x = ggplot2::element_blank(), axis.ticks.x = ggplot2::element_blank())
+
+  list(p_lib = p1, p_zero = p2, p_mv = p3, p_batch_aff = p4, p_de = p5)
+}
+
+#' Validate simulated dataset and effects
+#'
+#' @return list(summary=data.frame, plots=list(...), plot_panel=gg)
+validate_simulated_data <- function(counts_with_effect, batch_info, biological_vars, affected_genes, true_de_genes) {
+  # Sanity
+  sanity <- .sim_sanity_checks(counts_with_effect)
+  # Sparsity/Lib sizes
+  sp <- .sim_sparsity_and_libraries(counts_with_effect, batch_info)
+  # Mean-variance/Dispersion
+  disp <- .sim_estimate_dispersion(counts_with_effect)
+  # Effect checks
+  batch_chk <- .sim_check_batch_effects(counts_with_effect, batch_info, affected_genes)
+  de_chk    <- .sim_check_de_effects(counts_with_effect, biological_vars, true_de_genes)
+  # Independence
+  indep <- .sim_check_independence(batch_info, biological_vars)
+  # Global batch signal (PERMANOVA on pre-correction log-CPM)
+  logcpm <- edgeR::cpm(as.matrix(counts_with_effect), log = TRUE, prior.count = 1)
+  batch_r2 <- calculate_permanova_r2(log_counts = logcpm, variable_info = batch_info)
+
+  # Summary table
+  sum_df <- data.frame(
+    Metric = c(
+      "Counts numeric", "Counts integer", "Any NA", "Any Inf", "Any negative",
+      "n_genes", "n_samples", "Median lib size", "Median zero frac (samples)",
+      "Median zero frac (genes)", "Dispersion alpha (NB)", "Batch PERMANOVA R2",
+      "Independence p-value (batch vs bio)", "Cramer's V (batch vs bio)",
+      paste0("Median log2FC (aff) ", batch_chk$batch),
+      paste0("Median log2FC (unaff) ", batch_chk$batch),
+      "Median log2FC true DE (Sim2 vs Others)", "TPR (Sim1 vs Sim2)", "FPR (Sim1 vs Sim2)"
+    ),
+    Value = c(
+      sanity$is_numeric, sanity$all_int, sanity$has_na, sanity$has_inf, sanity$any_neg,
+      sanity$n_genes, sanity$n_samples, stats::median(sp$by_sample$lib_size),
+      stats::median(sp$by_sample$zero_frac), stats::median(sp$by_gene$zero_frac),
+      round(disp$alpha, 4), round(batch_r2, 4), signif(indep$p.value, 4), round(indep$cramer_v, 4),
+      round(batch_chk$med_log2FC_aff, 3), round(batch_chk$med_log2FC_unaff, 3),
+      round(de_chk$summary$med_log2FC_trueDE, 3), round(de_chk$de_metrics$TPR, 3), round(de_chk$de_metrics$FPR, 3)
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  # Plots
+  plots <- .sim_validation_plots(counts_with_effect, batch_info, affected_genes, de_chk)
+  panel <- (plots$p_lib | plots$p_zero | plots$p_mv) / (plots$p_batch_aff | plots$p_de)
+
+  list(summary = sum_df, plots = plots, plot_panel = panel, by_sample = sp$by_sample, by_gene = sp$by_gene, batch_effects = batch_chk, de = de_chk)
+}

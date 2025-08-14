@@ -6,7 +6,7 @@ PACKAGES <- c(
   "sva",   "RUVSeq", "EDASeq", "vegan",
   "cluster", "tidyr", "knitr", "batchelor",
   "SingleCellExperiment", "gtools", "R.cache",
-  "matrixStats", "lisi", "remotes", "welch-lab/kBET"
+  "matrixStats", "lisi", "remotes", "welch-lab/kBET", "scales"
 )
 
 
@@ -78,6 +78,18 @@ true_de_genes      <- prepared_data$true_de_genes
 meta_data <- data.frame(
   batch = batch_info, biology = biological_vars, row.names = colnames(counts_with_effect)
 )
+
+# --- 3b. Validate Simulated Data ---
+cat("\n--- Validating simulated data (pre-correction) ---\n")
+validation <- validate_simulated_data(
+  counts_with_effect = counts_with_effect,
+  batch_info = batch_info,
+  biological_vars = biological_vars,
+  affected_genes = affected_genes,
+  true_de_genes = true_de_genes
+)
+print(knitr::kable(validation$summary, digits = 3, caption = "Simulation validity checks"))
+print(validation$plot_panel)
 
 # --- 4. Pre-Correction Data & Pre-computation ---
 log_counts_before  <- edgeR::cpm(as.matrix(counts_with_effect), log=TRUE, prior.count=1)
