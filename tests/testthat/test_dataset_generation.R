@@ -17,7 +17,7 @@ test_that("create_base_sc_dataset returns a valid SummarizedExperiment with coun
 
   expect_s4_class(ds, "SummarizedExperiment")
   expect_true("counts" %in% SummarizedExperiment::assayNames(ds))
-  # Some implementations may drop all-zero genes; allow <= n_genes
+  # Implementations may drop all-zero genes; allow <= n_genes
   expect_lte(nrow(ds), n_genes)
   expect_gt(nrow(ds), 0)
   expect_equal(ncol(ds), n_cells)

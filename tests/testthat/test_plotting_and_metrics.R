@@ -21,7 +21,7 @@ test_that("metric helpers return numeric or NA as expected", {
   batch <- rep(c("B1", "B2"), each = 5)
   bio <- rep(c("Ctl", "Trt"), length.out = 10)
 
-  # These may return NA if packages not present; that's OK.
+  # May return NA if packages not present
   r2 <- try(calculate_permanova_r2(log_counts = log_counts, variable_info = batch), silent = TRUE)
   if (!inherits(r2, "try-error")) expect_true(is.numeric(r2) || is.na(r2))
 
@@ -36,7 +36,7 @@ test_that("run_de_and_evaluate returns bounded TPR/FPR", {
   testthat::skip_if_not_installed("limma")
 
   set.seed(3)
-  # Simulate two-group data with some true DE genes
+  # Simulate two-group data with true DE genes
   ng <- 60; ns <- 12
   bio <- rep(c("Ctl", "Trt"), each = ns/2)
   log_counts <- matrix(rnorm(ng * ns, 5, 1), nrow = ng)
