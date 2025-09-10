@@ -188,7 +188,7 @@ perform_pca_and_plot <- function(log_counts=NULL, batch_info, biological_vars, p
                         batch=batch_info, biology=as.factor(biological_vars))
   
   ggplot2::ggplot(plot_df, ggplot2::aes(x=PC1, y=PC2, color=batch, shape=biology)) +
-    ggplot2::geom_point(size=2.5, alpha=0.8) + 
+    ggplot2::geom_point(size=2.0, alpha=0.8) + 
     ggplot2::labs(title=clean_title, subtitle = subtitle_text) +
     ggplot2::theme_bw() + 
     ggplot2::scale_color_brewer(palette="Set1") +
@@ -451,7 +451,7 @@ run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
 }
 
 ################################################################################
-##                        SIMULATION VALIDATION                                ##
+##                        SIMULATION VALIDATION                               ##
 ################################################################################
 
 #' Quick sanity checks on count matrix
@@ -584,7 +584,7 @@ run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
   p4 <- ggplot2::ggplot(bdf, ggplot2::aes(x = batch, y = lfc, fill = batch)) +
     ggplot2::geom_violin(trim = FALSE) + ggplot2::geom_boxplot(width = 0.1, outlier.shape = NA) +
     ggplot2::theme_bw() + ggplot2::labs(title = "Affected genes: LFC vs ref batch", x = NULL, y = "log2FC") +
-    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1), legend.position = "none")
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, hjust = 1), legend.position = "none")
 
 
   list(p_lib = p1, p_zero = p2, p_mv = p3, p_batch_aff = p4)#, p_de = p5)
