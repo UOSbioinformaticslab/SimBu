@@ -1,4 +1,8 @@
 # SimBu - Simulations and Batch Correction Benchmarking for Bulk RNA-seq
+<p align="center">
+  <img src="assets/descriptive_plots.svg" alt="Descriptive Plots" width="800" />
+  <img src="assets/pca_plot.svg" alt="PCA Plots" width="800" />
+</p>
 
 ## Overview
 SimBu provides a reproducible R workflow to:
