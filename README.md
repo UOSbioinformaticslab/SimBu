@@ -1,7 +1,8 @@
 # SimBu - Simulations and Batch Correction Benchmarking for Bulk RNA-seq
 <p align="center">
-  <img src="assets/descriptive_plots.svg" alt="Descriptive Plots" width="800" />
-  <img src="assets/pca_plot.svg" alt="PCA Plots" width="800" />
+  <img src="assets/descriptive_plots.svg" alt="Descriptive Plots" width="400" />
+  <img src="assets/pca_plot.svg" alt="PCA Plots" width="400" />
+  <img src="assets/log2cpm_plots.svg" alt="Log2cpm Plots" width="400" />
 </p>
 
 ## Overview
