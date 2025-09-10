@@ -206,15 +206,33 @@ plot_log2cpm_boxplot_grid <- function(all_method_data, batch_info) {
   }) %>%
     dplyr::bind_rows() %>%
     dplyr::left_join(data.frame(SampleID = names(batch_info), Batch = batch_info), by = "SampleID")
-  method_levels <- sapply(all_method_data, function(m) m$name)
-  full_data_long$Method <- factor(full_data_long$Method, levels = unlist(method_levels))
-  
-  ggplot2::ggplot(full_data_long, aes(x = Batch, y = Log2CPM, fill = Batch)) +
+
+  # Coerce to numeric and drop non-finite values
+  full_data_long <- full_data_long %>%
+    dplyr::mutate(
+      Log2CPM = suppressWarnings(as.numeric(Log2CPM)),
+      Batch = as.factor(Batch),
+      Method = as.factor(Method)
+    ) %>%
+    dplyr::filter(is.finite(Log2CPM)) %>%
+    droplevels()
+
+  # Drop Method-Batch groups with < 2 observations to avoid stat failures
+  full_data_long <- full_data_long %>%
+    dplyr::group_by(Method, Batch) %>%
+    dplyr::filter(dplyr::n() >= 2) %>%
+    dplyr::ungroup()
+
+  # Preserve intended Method order
+  method_levels <- unlist(lapply(all_method_data, function(m) m$name))
+  full_data_long$Method <- factor(full_data_long$Method, levels = method_levels)
+
+  ggplot2::ggplot(full_data_long, ggplot2::aes(x = Batch, y = Log2CPM, fill = Batch)) +
     ggplot2::geom_boxplot(outlier.shape = NA, na.rm = TRUE) +
     ggplot2::facet_wrap(~Method, scales = "free_y") +
     ggplot2::labs(title = "Distribution of Log2-CPM Values by Batch and Method", x = "Batch", y = "Log2-CPM") +
     ggplot2::theme_bw() + ggplot2::scale_fill_brewer(palette = "Set1") +
-    ggplot2::theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1), legend.position = "none")
 }
 
 #' Run ComBat
@@ -568,13 +586,8 @@ run_de_and_evaluate <- function(log_data, biological_vars, true_de_genes) {
     ggplot2::theme_bw() + ggplot2::labs(title = "Affected genes: LFC vs ref batch", x = NULL, y = "log2FC") +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1), legend.position = "none")
 
-  # True DE gene LFC (Sim2 vs Others)
-  p5 <- ggplot2::ggplot(data.frame(lfc = de_check$lfc), ggplot2::aes(x = 1, y = lfc)) +
-    ggplot2::geom_violin(fill = "#56B4E9", alpha = 0.3) + ggplot2::geom_boxplot(width = 0.1, outlier.shape = NA) +
-    ggplot2::theme_bw() + ggplot2::labs(title = "True DE (Sim2 vs Others)", x = NULL, y = "log2FC") +
-    ggplot2::theme(axis.text.x = ggplot2::element_blank(), axis.ticks.x = ggplot2::element_blank())
 
-  list(p_lib = p1, p_zero = p2, p_mv = p3, p_batch_aff = p4, p_de = p5)
+  list(p_lib = p1, p_zero = p2, p_mv = p3, p_batch_aff = p4)#, p_de = p5)
 }
 
 #' Validate simulated dataset and effects

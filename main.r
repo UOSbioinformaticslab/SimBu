@@ -33,6 +33,7 @@ install_and_load_packages(PACKAGES)
 set.seed(123) # Set seed for reproducibility
 
 # --- 2. Data Generation and Simulation ---
+
 # <<< CACHING START for Data Generation >>>
 cat("--- Checking cache for prepared dataset... ---\n")
 data_params_key <- list(
