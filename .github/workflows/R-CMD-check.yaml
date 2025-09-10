@@ -31,7 +31,9 @@ jobs:
             any::rcmdcheck
             any::covr
             any::remotes
+            any::sessioninfo
           needs: check
+          package-deps: false
 
       - name: Detect package layout
         id: detect
