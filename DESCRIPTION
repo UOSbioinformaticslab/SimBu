@@ -1,33 +1,46 @@
 Package: SimBu
 Type: Package
-Title: Simulation and Batch Correction for Single-Cell RNA-seq Data
+Title: Simulation and Batch Correction for Single-Cell RNA-Seq Data
 Version: 0.1.0
 Authors@R: c(
-    person("Steph Ritchie", email = "s.ritchie@sussex.ac.uk", role = c("aut", "cre"))
+    person("Steph", "Ritchie", email = "stef1949.sr@outlook.com", role = c("aut", "cre"))
 )
-Description: This package provides tools for simulating single-cell RNA-seq data and evaluating batch correction methods. It includes functions for data generation, simulation, and various batch correction techniques.
-License: MIT
-Encoding: UTF-8
-LazyData: true
+Description: Tools to simulate single-cell RNA-seq count data with controllable
+    batch effects and biological structure, and to benchmark batch correction
+    and integration workflows. Provides functions to: (1) generate synthetic
+    expression matrices under varying assumptions; (2) introduce batch-,
+    library size-, and cell type–specific effects; (3) apply and compare
+    multiple batch correction / integration methods; and (4) compute
+    quantitative metrics to assess correction performance and biological
+    signal preservation. Designed to facilitate reproducible evaluation of
+    normalization, integration, and downstream analysis pipelines.
+License: MIT + file
+URL: https://github.com/stef1949/SimBu
+BugReports: https://github.com/stef1949/SimBu/issues
+Depends:
+    R (>= 4.1)
 Imports:
-    edgeR,
-    limma,
-    dplyr,
-    ggplot2,
-    patchwork,
-    SummarizedExperiment,
-    Matrix,
-    sva,
-    RUVSeq,
-    EDASeq,
-    vegan,
-    cluster,
-    tidyr,
-    knitr,
     batchelor,
+    cluster,
+    dplyr,
+    edgeR,
+    EDASeq,
+    ggplot2,
+    limma,
+    Matrix,
+    patchwork,
+    RUVSeq,
     SingleCellExperiment,
+    SummarizedExperiment,
+    sva,
+    tidyr,
+    vegan,
     cachem
 Suggests:
     knitr,
     rmarkdown
-RoxygenNote: 7.1.1
+VignetteBuilder: knitr
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.1
