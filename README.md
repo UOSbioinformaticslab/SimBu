@@ -1,4 +1,11 @@
 # SimBu - Simulations and Batch Correction Benchmarking for Bulk RNA-seq
+<div align="center">
+  
+  [![R-CMD-check](https://github.com/stef1949/SimBu/actions/workflows/R-CMD-check.yaml/badge.svg?branch=main)](https://github.com/stef1949/SimBu/actions/workflows/R-CMD-check.yaml)
+  [![Tests](https://github.com/stef1949/SimBu/actions/workflows/run-tests.yaml/badge.svg?branch=main)](https://github.com/stef1949/SimBu/actions/workflows/run-tests.yaml)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+</div>
+
 <p align="center">
   <img src="assets/descriptive_plots.svg" alt="Descriptive Plots" width="400" />
   <img src="assets/pca_plot.svg" alt="PCA Plots" width="400" />
