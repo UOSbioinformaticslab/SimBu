@@ -22,7 +22,7 @@ Data type
 - Outputs are bulk-level assays in a `SummarizedExperiment` (assay name `bulk_counts`).
 - Single-cell data are used only as a reference to parameterize simulations; they are not analyzed directly.
 
-This repo is organized as an analysis project (scripts + helpers). It uses functions from the RNAgen toolkit plus wrappers in `functions.r` to generate data, apply corrections, compute metrics, and visualize results.
+This repo is organized as an analysis project (scripts + helpers). It uses functions from the SimBu toolkit plus wrappers in `functions.r` to generate data, apply corrections, compute metrics, and visualize results.
 
 ## What's Included
 - `main.r`: End-to-end pipeline (data generation -> batch/biology effects -> corrections -> metrics -> plots). Uses caching for speed (`.Rcache`).
