@@ -1,8 +1,8 @@
-# SimBu - Simulations and Batch Correction Benchmarking for Bulk RNA-seq
+# RNAgen - Simulations and Batch Correction Benchmarking for Bulk RNA-seq
 <div align="center">
   
-  [![R-CMD-check](https://github.com/stef1949/SimBu/actions/workflows/R-CMD-check.yaml/badge.svg?branch=main)](https://github.com/stef1949/SimBu/actions/workflows/R-CMD-check.yaml)
-  [![Tests](https://github.com/stef1949/SimBu/actions/workflows/run-tests.yaml/badge.svg?branch=main)](https://github.com/stef1949/SimBu/actions/workflows/run-tests.yaml)
+  [![R-CMD-check](https://github.com/stef1949/RNAgen/actions/workflows/R-CMD-check.yaml/badge.svg?branch=main)](https://github.com/stef1949/RNAgen/actions/workflows/R-CMD-check.yaml)
+  [![Tests](https://github.com/stef1949/RNAgen/actions/workflows/run-tests.yaml/badge.svg?branch=main)](https://github.com/stef1949/RNAgen/actions/workflows/run-tests.yaml)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 </div>
 
@@ -13,7 +13,7 @@
 </p>
 
 ## Overview
-SimBu provides a reproducible R workflow to:
+RNAgen provides a reproducible R workflow to:
 - simulate bulk RNA-seq from single-cell profiles,
 - inject realistic batch and biological effects, and
 - benchmark common batch-correction methods with quantitative metrics and plots.
@@ -22,7 +22,7 @@ Data type
 - Outputs are bulk-level assays in a `SummarizedExperiment` (assay name `bulk_counts`).
 - Single-cell data are used only as a reference to parameterize simulations; they are not analyzed directly.
 
-This repo is organized as an analysis project (scripts + helpers). It uses functions from the SimBu toolkit plus wrappers in `functions.r` to generate data, apply corrections, compute metrics, and visualize results.
+This repo is organized as an analysis project (scripts + helpers). It uses functions from the RNAgen toolkit plus wrappers in `functions.r` to generate data, apply corrections, compute metrics, and visualize results.
 
 ## What's Included
 - `main.r`: End-to-end pipeline (data generation -> batch/biology effects -> corrections -> metrics -> plots). Uses caching for speed (`.Rcache`).
@@ -111,7 +111,7 @@ Metrics include: PERMANOVA R2 (batch), silhouette widths (batch/biology), kBET r
 This repository currently ships as a script-based project. If you intend to use it as a package, ensure a standard R package layout (`R/`, `NAMESPACE`, man docs). When the package structure is complete, you can install via:
 ```r
 install.packages("remotes")
-remotes::install_github("stef1949/SimBu")
+remotes::install_github("stef1949/RNAgen")
 ```
 
 ## Troubleshooting
